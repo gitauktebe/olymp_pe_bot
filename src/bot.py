@@ -1,0 +1,379 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from datetime import datetime
+
+from aiogram import Bot, Dispatcher, F
+from aiogram.enums import ParseMode
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import CallbackQuery, LabeledPrice, Message, PreCheckoutQuery
+
+from src.config import settings
+from src.db import db
+from src.logic import admin as admin_logic
+from src.logic import payments, quiz, rating
+from src.ui.keyboards import answers_kb, buy_kb, next_pack_kb, start_kb, unlimited_settings_kb
+from src.ui.texts import BLOCKED, NO_QUESTIONS, WELCOME, question_text
+
+logging.basicConfig(level=logging.INFO)
+
+bot = Bot(token=settings.telegram_bot_token, parse_mode=ParseMode.HTML)
+dp = Dispatcher()
+
+
+class AddQuestionFSM(StatesGroup):
+    topic_id = State()
+    difficulty = State()
+    text = State()
+    option1 = State()
+    option2 = State()
+    option3 = State()
+    option4 = State()
+    correct_option = State()
+
+
+class UnlimitedFSM(StatesGroup):
+    topic = State()
+    difficulty = State()
+
+
+async def send_next_question(message: Message, tg_id: int) -> None:
+    question = quiz.pick_question(tg_id)
+    if not question:
+        await message.answer(NO_QUESTIONS)
+        return
+    await message.answer(question_text(question), reply_markup=answers_kb(question["id"]))
+
+
+@dp.message(Command("start"))
+async def cmd_start(message: Message) -> None:
+    user = message.from_user
+    db.upsert_user(user.id, user.first_name, user.username)
+    db.ensure_user_settings(user.id)
+    quiz.ensure_day_row(user.id)
+    await message.answer(WELCOME, reply_markup=start_kb())
+
+
+@dp.message(F.text == "Начать")
+async def begin_quiz(message: Message) -> None:
+    tg_id = message.from_user.id
+    allowed, reason = quiz.can_start_quiz_now(tg_id)
+    if not allowed:
+        await message.answer(reason or BLOCKED, reply_markup=buy_kb())
+        return
+    if not quiz.consume_pack_if_needed(tg_id):
+        await message.answer("Лимит исчерпан", reply_markup=buy_kb())
+        return
+    quiz.reset_session(tg_id)
+    await send_next_question(message, tg_id)
+
+
+@dp.callback_query(F.data.startswith("ans:"))
+async def answer_handler(callback: CallbackQuery) -> None:
+    _, qid_s, answer_s = callback.data.split(":")
+    qid = int(qid_s)
+    answer = int(answer_s)
+    tg_id = callback.from_user.id
+
+    question = quiz.get_question_by_id(qid)
+    if not question:
+        await callback.answer("Вопрос не найден", show_alert=True)
+        return
+
+    ok, status = quiz.save_answer(tg_id, question, answer)
+    if not ok and status == "already_answered":
+        await callback.answer("Ответ уже принят")
+        return
+    if not ok:
+        await callback.answer("Этот вопрос уже не активен")
+        return
+
+    await callback.answer("Принято")
+
+    if status == "wrong" and not quiz.has_unlimited_now(tg_id):
+        await callback.message.answer(BLOCKED, reply_markup=buy_kb())
+        return
+
+    if quiz.package_completed(tg_id):
+        quiz.reset_package_progress(tg_id)
+        if quiz.has_unlimited_now(tg_id):
+            await callback.message.answer("Пакет завершён", reply_markup=next_pack_kb())
+            return
+
+    await send_next_question(callback.message, tg_id)
+
+
+@dp.callback_query(F.data == "next10")
+async def next10_handler(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await send_next_question(callback.message, callback.from_user.id)
+
+
+@dp.message(Command("rating"))
+async def cmd_rating(message: Message) -> None:
+    rows = rating.top50()
+    if not rows:
+        await message.answer("Рейтинг пока пуст")
+        return
+    lines = ["<b>TOP-50</b>"]
+    for i, row in enumerate(rows, start=1):
+        name = row.get("username") or row.get("first_name") or str(row["tg_id"])
+        lines.append(f"{i}. {name}: ✅ {int(row.get('total_correct', 0))} | 🔥 {int(row.get('best_streak', 0))}")
+    await message.answer("\n".join(lines))
+
+
+@dp.message(Command("stats"))
+async def cmd_stats(message: Message) -> None:
+    st = rating.user_stats(message.from_user.id)
+    until = st["unlimited_until"].isoformat() if st["unlimited_until"] else "нет"
+    await message.answer(
+        "\n".join(
+            [
+                f"Всего ответов: {st['total_answers']}",
+                f"Всего верных: {st['total_correct']}",
+                f"Лучшая серия: {st['best_streak']}",
+                f"Серия сегодня: {st['streak_today']}",
+                f"Безлимит до: {until}",
+            ]
+        )
+    )
+
+
+@dp.callback_query(F.data.startswith("buy:"))
+async def buy_handler(callback: CallbackQuery) -> None:
+    kind = callback.data.split(":", maxsplit=1)[1]
+    if kind == payments.PACK10:
+        title = "Пакет +10 вопросов"
+        description = "Открывает +10 вопросов прямо сейчас"
+        amount = settings.pack10_stars
+    else:
+        title = "Безлимит 30 дней"
+        description = "Бесконечный доступ + гибкие режимы"
+        amount = settings.unlimited30_stars
+
+    payload = f"{kind}:{callback.from_user.id}:{int(time.time())}"
+    await bot.send_invoice(
+        chat_id=callback.from_user.id,
+        title=title,
+        description=description,
+        payload=payload,
+        provider_token="",
+        currency="XTR",
+        prices=[LabeledPrice(label=title, amount=amount)],
+    )
+    await callback.answer()
+
+
+@dp.pre_checkout_query()
+async def pre_checkout(pre_checkout_query: PreCheckoutQuery) -> None:
+    await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
+
+
+@dp.message(F.successful_payment)
+async def successful_payment(message: Message) -> None:
+    payment = message.successful_payment
+    kind, tg_id_s, _ts = payment.invoice_payload.split(":")
+    tg_id = int(tg_id_s)
+
+    payments.register_purchase(
+        tg_id=tg_id,
+        kind=kind,
+        telegram_payment_charge_id=payment.telegram_payment_charge_id,
+        provider_payment_charge_id=payment.provider_payment_charge_id,
+        amount=payment.total_amount,
+    )
+
+    if kind == payments.PACK10:
+        payments.grant_pack10(tg_id)
+        await message.answer("+10 вопросов зачислены ✅")
+    else:
+        until = payments.grant_unlimited_30(tg_id)
+        await message.answer(f"Безлимит активирован до {until.isoformat()} ✅")
+
+
+@dp.message(F.text == "Настройки безлимита")
+async def unlimited_settings(message: Message) -> None:
+    if not quiz.has_unlimited_now(message.from_user.id):
+        await message.answer("Опция доступна только при активном безлимите", reply_markup=buy_kb())
+        return
+    await message.answer("Выбери режим выдачи:", reply_markup=unlimited_settings_kb())
+
+
+@dp.callback_query(F.data.startswith("setmode:"))
+async def setmode_handler(callback: CallbackQuery, state: FSMContext) -> None:
+    mode = callback.data.split(":", maxsplit=1)[1]
+    tg_id = callback.from_user.id
+    if mode == "random":
+        db.client.table("user_settings").update({"mode": "random", "topic_id": None, "difficulty": None}).eq("tg_id", tg_id).execute()
+        await callback.message.answer("Режим random включён")
+    elif mode == "topic":
+        rows = db.client.table("topics").select("id,title").eq("is_active", True).limit(100).execute().data or []
+        if not rows:
+            await callback.message.answer("Нет активных тем")
+            return
+        listing = "\n".join([f"{r['id']}: {r['title']}" for r in rows])
+        await state.set_state(UnlimitedFSM.topic)
+        await callback.message.answer(f"Отправь ID темы:\n{listing}")
+    else:
+        await state.set_state(UnlimitedFSM.difficulty)
+        await callback.message.answer("Отправь сложность 1..5")
+    await callback.answer()
+
+
+@dp.message(UnlimitedFSM.topic)
+async def set_topic(message: Message, state: FSMContext) -> None:
+    tg_id = message.from_user.id
+    topic_id = int(message.text.strip())
+    db.client.table("user_settings").update({"mode": "topic", "topic_id": topic_id, "difficulty": None}).eq("tg_id", tg_id).execute()
+    await message.answer("Режим topic включён")
+    await state.clear()
+
+
+@dp.message(UnlimitedFSM.difficulty)
+async def set_difficulty(message: Message, state: FSMContext) -> None:
+    tg_id = message.from_user.id
+    difficulty = int(message.text.strip())
+    if difficulty < 1 or difficulty > 5:
+        await message.answer("Нужно число 1..5")
+        return
+    db.client.table("user_settings").update({"mode": "difficulty", "difficulty": difficulty, "topic_id": None}).eq("tg_id", tg_id).execute()
+    await message.answer("Режим difficulty включён")
+    await state.clear()
+
+
+@dp.message(Command("admin_stats"))
+async def cmd_admin_stats(message: Message) -> None:
+    if not admin_logic.has_admin_access(message.from_user.id):
+        return
+    st = admin_logic.admin_stats()
+    await message.answer(
+        f"Пользователей: {st['total_users']}\nОтветов: {st['total_answers']}\nАктивных безлимитов: {st['active_unlimited']}"
+    )
+
+
+@dp.message(Command("grant_admin"))
+async def cmd_grant_admin(message: Message) -> None:
+    parts = message.text.split()
+    if len(parts) != 3:
+        await message.answer("Использование: /grant_admin <tg_id> <role>")
+        return
+    target = int(parts[1])
+    role = parts[2].strip()
+    ok = admin_logic.grant_admin(message.from_user.id, target, role)
+    await message.answer("OK" if ok else "Недостаточно прав")
+
+
+@dp.message(Command("revoke_admin"))
+async def cmd_revoke_admin(message: Message) -> None:
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer("Использование: /revoke_admin <tg_id>")
+        return
+    target = int(parts[1])
+    ok = admin_logic.revoke_admin(message.from_user.id, target)
+    await message.answer("OK" if ok else "Недостаточно прав")
+
+
+@dp.message(Command("add_question"))
+async def cmd_add_question(message: Message, state: FSMContext) -> None:
+    if not admin_logic.has_admin_access(message.from_user.id):
+        return
+    await state.set_state(AddQuestionFSM.topic_id)
+    await message.answer("ID темы?")
+
+
+@dp.message(AddQuestionFSM.topic_id)
+async def aq_topic(message: Message, state: FSMContext) -> None:
+    await state.update_data(topic_id=int(message.text))
+    await state.set_state(AddQuestionFSM.difficulty)
+    await message.answer("Сложность 1..5?")
+
+
+@dp.message(AddQuestionFSM.difficulty)
+async def aq_diff(message: Message, state: FSMContext) -> None:
+    await state.update_data(difficulty=int(message.text))
+    await state.set_state(AddQuestionFSM.text)
+    await message.answer("Текст вопроса?")
+
+
+@dp.message(AddQuestionFSM.text)
+async def aq_text(message: Message, state: FSMContext) -> None:
+    await state.update_data(text=message.text)
+    await state.set_state(AddQuestionFSM.option1)
+    await message.answer("Вариант 1?")
+
+
+@dp.message(AddQuestionFSM.option1)
+async def aq_o1(message: Message, state: FSMContext) -> None:
+    await state.update_data(option1=message.text)
+    await state.set_state(AddQuestionFSM.option2)
+    await message.answer("Вариант 2?")
+
+
+@dp.message(AddQuestionFSM.option2)
+async def aq_o2(message: Message, state: FSMContext) -> None:
+    await state.update_data(option2=message.text)
+    await state.set_state(AddQuestionFSM.option3)
+    await message.answer("Вариант 3?")
+
+
+@dp.message(AddQuestionFSM.option3)
+async def aq_o3(message: Message, state: FSMContext) -> None:
+    await state.update_data(option3=message.text)
+    await state.set_state(AddQuestionFSM.option4)
+    await message.answer("Вариант 4?")
+
+
+@dp.message(AddQuestionFSM.option4)
+async def aq_o4(message: Message, state: FSMContext) -> None:
+    await state.update_data(option4=message.text)
+    await state.set_state(AddQuestionFSM.correct_option)
+    await message.answer("Правильный вариант (1..4)?")
+
+
+@dp.message(AddQuestionFSM.correct_option)
+async def aq_done(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    correct_option = int(message.text)
+    db.client.table("questions").insert(
+        {
+            "topic_id": data["topic_id"],
+            "difficulty": data["difficulty"],
+            "text": data["text"],
+            "option1": data["option1"],
+            "option2": data["option2"],
+            "option3": data["option3"],
+            "option4": data["option4"],
+            "correct_option": correct_option,
+            "is_active": True,
+        }
+    ).execute()
+    await state.clear()
+    await message.answer("Вопрос добавлен")
+
+
+@dp.message(Command("toggle_question"))
+async def cmd_toggle_question(message: Message) -> None:
+    if not admin_logic.has_admin_access(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer("Использование: /toggle_question <id>")
+        return
+    qid = int(parts[1])
+    row = db.client.table("questions").select("id,is_active").eq("id", qid).single().execute().data
+    db.client.table("questions").update({"is_active": not bool(row["is_active"])}).eq("id", qid).execute()
+    await message.answer("Статус переключён")
+
+
+async def main() -> None:
+    db.ensure_schema()
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
