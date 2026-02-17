@@ -15,8 +15,16 @@ source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 # заполните TELEGRAM_BOT_TOKEN и ключи Supabase
-python -m src.bot
+python src/bot.py
 ```
+
+## Запуск через Docker
+
+```bash
+docker compose up -d --build
+```
+
+`.env` создаётся на сервере вручную и не коммитится в репозиторий.
 
 ## Переменные окружения
 См. `.env.example`.
