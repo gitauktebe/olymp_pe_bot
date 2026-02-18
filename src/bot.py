@@ -88,6 +88,21 @@ async def send_next_question(message: Message, tg_id: int) -> None:
     await message.answer(question_text(question), reply_markup=answers_kb(question["id"]))
 
 
+def _stats_message(st: dict) -> str:
+    until = st["unlimited_until"].isoformat() if st["unlimited_until"] else "нет"
+    progress_today = "безлимит" if st["unlimited_until"] else f"{st['correct_today']}/{quiz.DAILY_LIMIT}"
+    return "\n".join(
+        [
+            f"Всего верных: {st['total_correct']}",
+            f"Всего ошибок: {st['total_wrong']}",
+            f"Лучшая серия: {st['best_streak']}",
+            f"Серия сегодня: {st['streak_today']}",
+            f"Прогресс за сегодня: {progress_today}",
+            f"Безлимит до: {until}",
+        ]
+    )
+
+
 @dp.message(Command("start"))
 async def cmd_start(message: Message) -> None:
     user = message.from_user
@@ -193,18 +208,13 @@ async def cmd_rating(message: Message) -> None:
 @dp.message(Command("stats"))
 async def cmd_stats(message: Message) -> None:
     st = rating.user_stats(message.from_user.id)
-    until = st["unlimited_until"].isoformat() if st["unlimited_until"] else "нет"
-    await message.answer(
-        "\n".join(
-            [
-                f"Всего ответов: {st['total_answers']}",
-                f"Всего верных: {st['total_correct']}",
-                f"Лучшая серия: {st['best_streak']}",
-                f"Серия сегодня: {st['streak_today']}",
-                f"Безлимит до: {until}",
-            ]
-        )
-    )
+    await message.answer(_stats_message(st))
+
+
+@dp.message(F.text == "Моя статистика")
+async def my_stats_button(message: Message) -> None:
+    st = rating.user_stats(message.from_user.id)
+    await message.answer(_stats_message(st))
 
 
 @dp.callback_query(F.data.startswith("buy:"))

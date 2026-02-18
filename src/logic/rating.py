@@ -5,13 +5,15 @@ from src.logic.quiz import ensure_day_row, get_unlimited_until
 
 
 def user_stats(tg_id: int) -> dict:
-    user = db.client.table("users").select("total_answers,total_correct,best_streak").eq("tg_id", tg_id).single().execute().data
+    user = db.client.table("users").select("total_answers,total_correct,total_wrong,best_streak").eq("tg_id", tg_id).single().execute().data
     day = ensure_day_row(tg_id)
     return {
         "total_answers": int(user.get("total_answers", 0)),
         "total_correct": int(user.get("total_correct", 0)),
+        "total_wrong": int(user.get("total_wrong", 0)),
         "best_streak": int(user.get("best_streak", 0)),
         "streak_today": int(day.get("streak_today", 0)),
+        "correct_today": int(day.get("correct_count", 0)),
         "unlimited_until": get_unlimited_until(tg_id),
     }
 
