@@ -42,6 +42,7 @@ def insert_payment_if_new(
         db.client.table("payments").insert(
             {
                 "tg_id": tg_id,
+                "provider": "telegram_stars",
                 "currency": currency,
                 "total_amount": total_amount,
                 "invoice_payload": invoice_payload,

@@ -45,6 +45,41 @@ class UnlimitedFSM(StatesGroup):
     difficulty = State()
 
 
+def can_use_test_commands(tg_id: int) -> bool:
+    return settings.test_mode and admin_logic.has_test_mode_access(tg_id)
+
+
+async def process_test_payment(message: Message, payload: str, amount: int) -> None:
+    tg_id = message.from_user.id
+    charge_id = f"TEST-{tg_id}-{payload}-{int(datetime.now(timezone.utc).timestamp())}"
+
+    is_new = payments.insert_payment_if_new(
+        tg_id=tg_id,
+        currency="XTR",
+        total_amount=amount,
+        invoice_payload=payload,
+        telegram_payment_charge_id=charge_id,
+    )
+    if not is_new:
+        await message.answer("🧪 TEST MODE: тестовая оплата уже учтена")
+        return
+
+    if payload == payments.PACK10_PAYLOAD:
+        payments.grant_pack10(tg_id)
+        await message.answer(
+            "🧪 TEST MODE: начислено +10 вопросов.",
+            reply_markup=start_kb(has_unlimited=quiz.has_unlimited_now(tg_id)),
+        )
+        return
+
+    until = payments.grant_unlimited_30(tg_id)
+    until_local = until.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    await message.answer(
+        f"🧪 TEST MODE: начислен безлимит до {until_local}.",
+        reply_markup=start_kb(has_unlimited=True),
+    )
+
+
 async def send_next_question(message: Message, tg_id: int) -> None:
     question = quiz.pick_question(tg_id)
     if not question:
@@ -226,6 +261,21 @@ async def successful_payment(message: Message) -> None:
     except Exception:
         logger.exception("Payment processing failed: tg_id=%s payload=%s", tg_id, payload)
         await message.answer("Ошибка при обработке оплаты, мы уже видим платеж. Напиши администратору.")
+
+
+if settings.test_mode:
+    @dp.message(Command("test_pay_pack10"))
+    async def cmd_test_pay_pack10(message: Message) -> None:
+        if not can_use_test_commands(message.from_user.id):
+            return
+        await process_test_payment(message, payments.PACK10_PAYLOAD, settings.pack10_stars)
+
+
+    @dp.message(Command("test_pay_unlimited30"))
+    async def cmd_test_pay_unlimited30(message: Message) -> None:
+        if not can_use_test_commands(message.from_user.id):
+            return
+        await process_test_payment(message, payments.UNLIMITED30_PAYLOAD, settings.unlimited30_stars)
 
 
 @dp.message(Command("my_payments"))

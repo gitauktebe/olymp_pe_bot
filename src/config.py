@@ -17,6 +17,8 @@ class Settings:
     timezone: str = "Europe/Berlin"
     pack10_stars: int = 300
     unlimited30_stars: int = 1500
+    test_mode: bool = False
+    admin_tg_ids: tuple[int, ...] = ()
 
 
 
@@ -27,6 +29,24 @@ def _required(name: str) -> str:
     return value
 
 
+def _parse_bool(value: str | None) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_admin_tg_ids(value: str | None) -> tuple[int, ...]:
+    if not value:
+        return ()
+    result: list[int] = []
+    for item in value.split(","):
+        token = item.strip()
+        if not token:
+            continue
+        result.append(int(token))
+    return tuple(result)
+
+
 settings = Settings(
     telegram_bot_token=_required("TELEGRAM_BOT_TOKEN"),
     supabase_url=_required("SUPABASE_URL"),
@@ -35,4 +55,6 @@ settings = Settings(
     timezone=os.getenv("TIMEZONE", "Europe/Berlin").strip() or "Europe/Berlin",
     pack10_stars=int(os.getenv("PACK10_STARS", "300")),
     unlimited30_stars=int(os.getenv("UNLIMITED30_STARS", "1500")),
+    test_mode=_parse_bool(os.getenv("TEST_MODE")),
+    admin_tg_ids=_parse_admin_tg_ids(os.getenv("ADMIN_TG_IDS")),
 )
