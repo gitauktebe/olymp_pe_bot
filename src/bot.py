@@ -109,7 +109,12 @@ def _split_bulk_blocks(raw_text: str) -> list[str]:
     blocks: list[str] = []
     current: list[str] = []
     for line in raw_text.splitlines():
-        if line.strip() == "---":
+        normalized = line.strip()
+        if not normalized:
+            current.append(line)
+            continue
+
+        if normalized == "---":
             block = "\n".join(current).strip()
             if block:
                 blocks.append(block)
@@ -164,12 +169,12 @@ def _parse_bulk_block(block: str) -> dict:
             options[letter] = option_match.group(2).strip()
             continue
 
-        q_match = re.match(r"^[QВ]\s*:\s*(.+)$", line, flags=re.IGNORECASE)
+        q_match = re.match(r"^(?:Q|В)\s*:\s*(.+)$", line, flags=re.IGNORECASE)
         if q_match:
             payload["text"] = q_match.group(1).strip()
             continue
 
-        field_match = re.match(r"^([A-Z_]+)\s*:\s*(.+)$", line, flags=re.IGNORECASE)
+        field_match = re.match(r"^([A-ZА-Я_]+)\s*:\s*(.*)$", line, flags=re.IGNORECASE)
         if not field_match:
             raise ValueError(f"непонятная строка: {line}")
 
@@ -182,12 +187,17 @@ def _parse_bulk_block(block: str) -> dict:
                 raise ValueError("ANS должен быть A/B/C/D")
             payload["correct_option"] = {"A": 1, "B": 2, "C": 3, "D": 4}[answer_letter]
         elif key == "TOPIC":
-            payload["topic_id"] = _resolve_topic_id(value)
+            if value:
+                payload["topic_id"] = _resolve_topic_id(value)
         elif key == "DIFF":
+            if not value:
+                continue
             if not value.isdigit() or not (1 <= int(value) <= 5):
                 raise ValueError("DIFF должен быть числом 1..5")
             payload["difficulty"] = int(value)
         elif key == "ACTIVE":
+            if not value:
+                continue
             bool_value = _parse_bool(value)
             if bool_value is None:
                 raise ValueError("ACTIVE должен быть true/false")
@@ -625,9 +635,10 @@ async def admin_bulk_import_prompt(callback: CallbackQuery, state: FSMContext) -
     await callback.message.answer(
         "Отправь текст импорта. Один блок = один вопрос, разделитель блоков: ---\n\n"
         "Формат:\n"
-        "Q: <текст вопроса>\n"
+        "Q: <текст вопроса> (или В:)\n"
         "A) <вариант 1>\nB) <вариант 2>\nC) <вариант 3>\nD) <вариант 4>\n"
-        "ANS: <A|B|C|D>\nTOPIC: <необязательно>\nDIFF: <1-5 необязательно>\nACTIVE: <true|false необязательно>"
+        "ANS: <A|B|C|D>\nTOPIC: <необязательно>\nDIFF: <1-5 необязательно>\nACTIVE: <true|false необязательно>\n\n"
+        "Если TOPIC / DIFF не указаны — сохранятся как пустые. ACTIVE по умолчанию true."
     )
     await callback.answer()
 

@@ -91,7 +91,16 @@ C) Париж
 D) Рим
 ANS: C
 ---
+
+Q: Какой оператор в Python делает возведение в степень?
+A) //
+B) **
+C) ==
+D) ->
+ANS: B
 ```
+
+Во втором блоке `TOPIC`, `DIFF` и `ACTIVE` не указаны — вопрос сохранится с `topic_id = null`, `difficulty = null` и `is_active = true`.
 
 ## Монетизация Telegram Stars
 
