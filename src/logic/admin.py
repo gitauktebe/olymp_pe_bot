@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from src.config import settings
 from src.db import db
 
 ROLE_ORDER = {"editor": 1, "admin": 2, "owner": 3}
@@ -62,3 +63,7 @@ def admin_stats() -> dict:
         "total_answers": total_answers,
         "active_unlimited": active_subs,
     }
+
+
+def has_test_mode_access(tg_id: int) -> bool:
+    return tg_id in settings.admin_tg_ids or has_admin_access(tg_id)

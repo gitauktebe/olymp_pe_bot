@@ -61,6 +61,7 @@ create table if not exists public.user_settings (
 - `/stats` — персональная статистика
 - `/my_payments` — мои покупки и последние платежи
 - `/admin_stats`, `/grant_admin`, `/revoke_admin`, `/add_question`, `/toggle_question` — админка
+- `/test_pay_pack10`, `/test_pay_unlimited30` — тестовые платежи (только при `TEST_MODE=true` и только для админов)
 
 ## Добавление вопросов
 - Через `/add_question` (диалог в боте)
@@ -77,3 +78,22 @@ create table if not exists public.user_settings (
    - идемпотентность по `telegram_payment_charge_id`
    - начисление пакета (`paid_packs_available + 1`) или продление `subscriptions.unlimited_until` на 30 дней
 4. Пользователь может открыть `/my_payments` (или кнопку «Мои покупки») и увидеть баланс пакетов, статус безлимита и последние 3 платежа.
+
+
+## Тестовый режим платежей
+
+Для тестирования сценария успешной оплаты без Telegram Stars:
+
+1. В `.env` включите режим и задайте админов:
+
+```env
+TEST_MODE=true
+ADMIN_TG_IDS=123456789,987654321
+```
+
+2. Перезапустите бота.
+3. В Telegram (под админ-аккаунтом) используйте команды:
+   - `/test_pay_pack10` — симулирует покупку `PACK10`
+   - `/test_pay_unlimited30` — симулирует покупку `UNLIMITED30`
+
+Обе команды создают запись в `payments` и выполняют то же начисление, что и реальная `successful_payment`.
