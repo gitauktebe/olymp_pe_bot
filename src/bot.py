@@ -16,7 +16,7 @@ from src.config import settings
 from src.db import db
 from src.logic import admin as admin_logic
 from src.logic import entitlements, payments, quiz, rating
-from src.ui.keyboards import answers_kb, buy_kb, next_question_kb, start_kb, unlimited_settings_kb
+from src.ui.keyboards import answers_kb, buy_kb, next_question_kb, rating_type_kb, start_kb, unlimited_settings_kb
 from src.ui.texts import BLOCKED, DAILY_DONE, NO_QUESTIONS, WELCOME, WRONG_STOP, question_text
 
 logging.basicConfig(level=logging.INFO)
@@ -192,17 +192,53 @@ async def menu_button(message: Message) -> None:
     await message.answer("Выбери действие", reply_markup=start_kb(has_unlimited=quiz.has_unlimited_now(message.from_user.id)))
 
 
+def _leaderboard_title(metric: str) -> str:
+    return "Всего верных" if metric == "total_correct" else "Лучшая серия"
+
+
+def _metric_emoji(metric: str) -> str:
+    return "✅" if metric == "total_correct" else "🔥"
+
+
+def _leaderboard_message(metric: str, rows: list[dict], current_rank: int) -> str:
+    title = _leaderboard_title(metric)
+    emoji = _metric_emoji(metric)
+    lines = [f"<b>Рейтинг: {title}</b>"]
+
+    if not rows:
+        lines.append("Пока нет данных")
+    else:
+        for i, row in enumerate(rows, start=1):
+            name = row.get("username") or row.get("first_name") or str(row["tg_id"])
+            value = int(row.get(metric, 0))
+            lines.append(f"{i}. {name}: {emoji} {value}")
+
+    lines.append("")
+    lines.append(f"Ваше место: {current_rank}")
+    return "\n".join(lines)
+
+
 @dp.message(Command("rating"))
 async def cmd_rating(message: Message) -> None:
-    rows = rating.top50()
-    if not rows:
-        await message.answer("Рейтинг пока пуст")
+    await message.answer("Выбери тип рейтинга:", reply_markup=rating_type_kb())
+
+
+@dp.message(F.text == "Рейтинг")
+async def rating_button(message: Message) -> None:
+    await message.answer("Выбери тип рейтинга:", reply_markup=rating_type_kb())
+
+
+@dp.callback_query(F.data.startswith("rating:"))
+async def rating_type_handler(callback: CallbackQuery) -> None:
+    metric = callback.data.split(":", maxsplit=1)[1]
+    if metric not in {"total_correct", "best_streak"}:
+        await callback.answer("Неизвестный тип рейтинга", show_alert=True)
         return
-    lines = ["<b>TOP-50</b>"]
-    for i, row in enumerate(rows, start=1):
-        name = row.get("username") or row.get("first_name") or str(row["tg_id"])
-        lines.append(f"{i}. {name}: ✅ {int(row.get('total_correct', 0))} | 🔥 {int(row.get('best_streak', 0))}")
-    await message.answer("\n".join(lines))
+
+    rows = rating.top10(metric)
+    current_rank = rating.user_rank(callback.from_user.id, metric)
+    await callback.message.answer(_leaderboard_message(metric, rows, current_rank))
+    await callback.answer()
 
 
 @dp.message(Command("stats"))
