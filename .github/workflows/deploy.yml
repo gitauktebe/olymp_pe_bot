@@ -1,0 +1,28 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+            mkdir -p /opt
+            if [ ! -d "/opt/olymp_pe_bot/.git" ]; then
+              cd /opt
+              git clone https://github.com/${{ github.repository }}.git olymp_pe_bot
+            fi
+            cd /opt/olymp_pe_bot
+            git pull
+            docker compose up -d --build
+            docker image prune -f
