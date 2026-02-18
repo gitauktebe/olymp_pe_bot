@@ -68,9 +68,8 @@ def grant_pack10(tg_id: int) -> None:
 def grant_unlimited_30(tg_id: int) -> datetime:
     current = (
         db.client.table("subscriptions")
-        .select("id,unlimited_until")
+        .select("unlimited_until")
         .eq("tg_id", tg_id)
-        .order("unlimited_until", desc=True)
         .limit(1)
         .execute()
         .data
@@ -88,7 +87,6 @@ def grant_unlimited_30(tg_id: int) -> datetime:
         {
             "tg_id": tg_id,
             "unlimited_until": new_until.isoformat(),
-            "updated_at": now.isoformat(),
         },
         on_conflict="tg_id",
     ).execute()
@@ -103,7 +101,6 @@ def get_user_purchases_summary(tg_id: int) -> dict[str, Any]:
         db.client.table("subscriptions")
         .select("unlimited_until")
         .eq("tg_id", tg_id)
-        .order("unlimited_until", desc=True)
         .limit(1)
         .execute()
         .data
