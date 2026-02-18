@@ -19,7 +19,9 @@ def answers_kb(question_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def buy_kb() -> InlineKeyboardMarkup:
+def buy_kb(monetization_enabled: bool = True) -> InlineKeyboardMarkup | None:
+    if not monetization_enabled:
+        return None
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Купить +10", callback_data="buy:pack10")],

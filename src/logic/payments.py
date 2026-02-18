@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Any
 
 from postgrest.exceptions import APIError
@@ -55,42 +55,6 @@ def insert_payment_if_new(
         if "payments_telegram_payment_charge_id_key" in details or "duplicate key" in details:
             return False
         raise
-
-
-def grant_pack10(tg_id: int) -> None:
-    settings_row = db.ensure_user_settings(tg_id)
-    available = int(settings_row.get("paid_packs_available", 0))
-    db.client.table("user_settings").update(
-        {"paid_packs_available": available + 1, "updated_at": datetime.utcnow().isoformat()}
-    ).eq("tg_id", tg_id).execute()
-
-
-def grant_unlimited_30(tg_id: int) -> datetime:
-    current = (
-        db.client.table("subscriptions")
-        .select("unlimited_until")
-        .eq("tg_id", tg_id)
-        .limit(1)
-        .execute()
-        .data
-    )
-
-    now = datetime.now(timezone.utc)
-    if current and current[0].get("unlimited_until"):
-        existing = datetime.fromisoformat(current[0]["unlimited_until"].replace("Z", "+00:00"))
-        start = existing if existing > now else now
-    else:
-        start = now
-
-    new_until = start + timedelta(days=30)
-    db.client.table("subscriptions").upsert(
-        {
-            "tg_id": tg_id,
-            "unlimited_until": new_until.isoformat(),
-        },
-        on_conflict="tg_id",
-    ).execute()
-    return new_until
 
 
 def get_user_purchases_summary(tg_id: int) -> dict[str, Any]:

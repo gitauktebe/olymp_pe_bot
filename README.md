@@ -70,15 +70,16 @@ create table if not exists public.user_settings (
 ## Монетизация Telegram Stars
 
 1. Примените SQL-миграцию `scripts/001_payments.sql` в Supabase SQL Editor.
-2. Инвойсы Stars создаются в `buy_handler` (`src/bot.py`) с фиксированным `invoice_payload`:
+2. В `.env` есть переключатель `MONETIZATION_ENABLED`:
+   - `false` (по умолчанию) — кнопки покупок скрыты, `successful_payment` не начисляет доступ;
+   - `true` — кнопки покупок показываются и обработка Stars-платежей включается.
+3. Инвойсы Stars создаются в `buy_handler` (`src/bot.py`) с фиксированным `invoice_payload`:
    - `PACK10` для пакета +10 (стоимость из `PACK10_STARS`)
    - `UNLIMITED30` для безлимита 30 дней (стоимость из `UNLIMITED30_STARS`)
-3. Обработка `successful_payment` находится в `src/bot.py`:
-   - запись платежа в `public.payments`
-   - идемпотентность по `telegram_payment_charge_id`
+4. Начисления выполняются через единый сервис `grant_purchase` (`src/logic/entitlements.py`):
+   - идемпотентная запись платежа в `public.payments` по `telegram_payment_charge_id`
    - начисление пакета (`paid_packs_available + 1`) или продление `subscriptions.unlimited_until` на 30 дней
-4. Пользователь может открыть `/my_payments` (или кнопку «Мои покупки») и увидеть баланс пакетов, статус безлимита и последние 3 платежа.
-
+5. Пользователь может открыть `/my_payments` (или кнопку «Мои покупки») и увидеть баланс пакетов, статус безлимита и последние 3 платежа.
 
 ## Тестовый режим платежей
 
@@ -96,4 +97,4 @@ ADMIN_TG_IDS=123456789,987654321
    - `/test_pay_pack10` — симулирует покупку `PACK10`
    - `/test_pay_unlimited30` — симулирует покупку `UNLIMITED30`
 
-Обе команды создают запись в `payments` и выполняют то же начисление, что и реальная `successful_payment`.
+Обе команды вызывают тот же общий сервис начисления, что и реальная `successful_payment`, поэтому тестовый и боевой флоу синхронизированы.
