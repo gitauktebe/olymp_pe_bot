@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
@@ -21,6 +20,7 @@ from src.ui.keyboards import answers_kb, buy_kb, next_pack_kb, start_kb, unlimit
 from src.ui.texts import BLOCKED, NO_QUESTIONS, WELCOME, question_text
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 bot = Bot(
     token=settings.telegram_bot_token,
@@ -59,7 +59,7 @@ async def cmd_start(message: Message) -> None:
     db.upsert_user(user.id, user.first_name, user.username)
     db.ensure_user_settings(user.id)
     quiz.ensure_day_row(user.id)
-    await message.answer(WELCOME, reply_markup=start_kb())
+    await message.answer(WELCOME, reply_markup=start_kb(has_unlimited=quiz.has_unlimited_now(user.id)))
 
 
 @dp.message(F.text == "Начать")
@@ -159,7 +159,7 @@ async def buy_handler(callback: CallbackQuery) -> None:
         description = "Бесконечный доступ + гибкие режимы"
         amount = settings.unlimited30_stars
 
-    payload = f"{kind}:{callback.from_user.id}:{int(time.time())}"
+    payload = payments.payload_for_kind(kind)
     await bot.send_invoice(
         chat_id=callback.from_user.id,
         title=title,
@@ -180,23 +180,89 @@ async def pre_checkout(pre_checkout_query: PreCheckoutQuery) -> None:
 @dp.message(F.successful_payment)
 async def successful_payment(message: Message) -> None:
     payment = message.successful_payment
-    kind, tg_id_s, _ts = payment.invoice_payload.split(":")
-    tg_id = int(tg_id_s)
+    tg_id = message.from_user.id
+    payload = payment.invoice_payload
+    kind = payments.kind_from_payload(payload)
 
-    payments.register_purchase(
-        tg_id=tg_id,
-        kind=kind,
-        telegram_payment_charge_id=payment.telegram_payment_charge_id,
-        provider_payment_charge_id=payment.provider_payment_charge_id,
-        amount=payment.total_amount,
-    )
+    if kind is None:
+        await message.answer("Не удалось определить тип покупки. Напиши администратору.")
+        return
 
-    if kind == payments.PACK10:
-        payments.grant_pack10(tg_id)
-        await message.answer("+10 вопросов зачислены ✅")
-    else:
+    expected_amount = settings.pack10_stars if kind == payments.PACK10 else settings.unlimited30_stars
+    if payment.total_amount != expected_amount:
+        logger.error(
+            "Payment amount mismatch: tg_id=%s payload=%s expected=%s got=%s",
+            tg_id,
+            payload,
+            expected_amount,
+            payment.total_amount,
+        )
+        await message.answer("Ошибка при обработке оплаты, мы уже видим платеж. Напиши администратору.")
+        return
+
+    try:
+        is_new = payments.insert_payment_if_new(
+            tg_id=tg_id,
+            currency=payment.currency,
+            total_amount=payment.total_amount,
+            invoice_payload=payload,
+            telegram_payment_charge_id=payment.telegram_payment_charge_id,
+        )
+        if not is_new:
+            await message.answer("Оплата уже учтена ✅")
+            return
+
+        if kind == payments.PACK10:
+            payments.grant_pack10(tg_id)
+            await message.answer("✅ Оплата принята. Добавлено +10 вопросов.", reply_markup=start_kb(has_unlimited=quiz.has_unlimited_now(tg_id)))
+            return
+
         until = payments.grant_unlimited_30(tg_id)
-        await message.answer(f"Безлимит активирован до {until.isoformat()} ✅")
+        until_local = until.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        await message.answer(
+            f"✅ Безлимит активирован до {until_local}.",
+            reply_markup=start_kb(has_unlimited=True),
+        )
+    except Exception:
+        logger.exception("Payment processing failed: tg_id=%s payload=%s", tg_id, payload)
+        await message.answer("Ошибка при обработке оплаты, мы уже видим платеж. Напиши администратору.")
+
+
+@dp.message(Command("my_payments"))
+async def cmd_my_payments(message: Message) -> None:
+    summary = payments.get_user_purchases_summary(message.from_user.id)
+    unlimited_until = summary["unlimited_until"]
+    now = datetime.now(timezone.utc)
+
+    if unlimited_until and unlimited_until > now:
+        unlimited_line = f"активен до {unlimited_until.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
+    else:
+        unlimited_line = "не активен"
+
+    lines = [
+        "<b>Мои покупки</b>",
+        f"Пакеты +10: {summary['packs_available']}",
+        f"Безлимит: {unlimited_line}",
+        "",
+        "Последние платежи:",
+    ]
+
+    recent = summary["recent_payments"]
+    if not recent:
+        lines.append("— пока нет")
+    else:
+        for row in recent:
+            created_at = datetime.fromisoformat(row["created_at"].replace("Z", "+00:00")).astimezone(timezone.utc)
+            lines.append(
+                f"— {created_at.strftime('%Y-%m-%d %H:%M')} | {row['invoice_payload']} | {row['total_amount']} {row['currency']}"
+            )
+
+    await message.answer("\n".join(lines), reply_markup=start_kb(has_unlimited=bool(unlimited_until and unlimited_until > now)))
+
+
+@dp.message(F.text == "Мои покупки")
+async def my_payments_button(message: Message) -> None:
+    await cmd_my_payments(message)
 
 
 @dp.message(F.text == "Настройки безлимита")
