@@ -6,6 +6,7 @@ import time
 from datetime import datetime
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -21,7 +22,10 @@ from src.ui.texts import BLOCKED, NO_QUESTIONS, WELCOME, question_text
 
 logging.basicConfig(level=logging.INFO)
 
-bot = Bot(token=settings.telegram_bot_token, parse_mode=ParseMode.HTML)
+bot = Bot(
+    token=settings.telegram_bot_token,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+)
 dp = Dispatcher()
 
 
