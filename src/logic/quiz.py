@@ -158,20 +158,17 @@ def save_answer(tg_id: int, question: dict[str, Any], answer_index: int) -> tupl
         updates["streak_today"] = 0
     db.client.table("user_day").update(updates).eq("tg_id", tg_id).eq("day", _today_str()).execute()
 
-    stats = db.client.table("users").select("total_answers,total_correct,best_streak,current_streak").eq("tg_id", tg_id).single().execute().data
-    current_streak = int(stats.get("current_streak", 0))
+    stats = db.client.table("users").select("total_answers,total_correct,total_wrong,best_streak").eq("tg_id", tg_id).single().execute().data
     best_streak = int(stats.get("best_streak", 0))
-    if is_correct:
-        current_streak += 1
-        best_streak = max(best_streak, current_streak)
-    else:
-        current_streak = 0
+    today_streak = int(updates.get("streak_today", day_row.get("streak_today", 0)))
+    if today_streak > best_streak:
+        best_streak = today_streak
 
     db.client.table("users").update(
         {
             "total_answers": int(stats.get("total_answers", 0)) + 1,
             "total_correct": int(stats.get("total_correct", 0)) + (1 if is_correct else 0),
-            "current_streak": current_streak,
+            "total_wrong": int(stats.get("total_wrong", 0)) + (0 if is_correct else 1),
             "best_streak": best_streak,
         }
     ).eq("tg_id", tg_id).execute()

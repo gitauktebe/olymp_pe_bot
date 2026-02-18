@@ -2,7 +2,12 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardBu
 
 
 def start_kb(has_unlimited: bool = False) -> ReplyKeyboardMarkup:
-    keyboard = [[KeyboardButton(text="Начать")], [KeyboardButton(text="Меню")], [KeyboardButton(text="Мои покупки")]]
+    keyboard = [
+        [KeyboardButton(text="Начать")],
+        [KeyboardButton(text="Меню")],
+        [KeyboardButton(text="Моя статистика")],
+        [KeyboardButton(text="Мои покупки")],
+    ]
     if has_unlimited:
         keyboard.append([KeyboardButton(text="Настройки безлимита")])
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)

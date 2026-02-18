@@ -57,6 +57,10 @@ class Database:
         alter table if exists public.user_day add column if not exists is_blocked boolean not null default false;
         alter table if exists public.user_day add column if not exists correct_count integer not null default 0;
         alter table if exists public.user_day add column if not exists wrong_count integer not null default 0;
+
+        alter table if exists public.users add column if not exists total_correct integer not null default 0;
+        alter table if exists public.users add column if not exists total_wrong integer not null default 0;
+        alter table if exists public.users add column if not exists best_streak integer not null default 0;
         """.strip()
 
         if self._run_sql_via_pg_endpoint(migration_sql):
