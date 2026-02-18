@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import datetime, timezone
 
 from aiogram import Bot, Dispatcher, F
@@ -51,6 +52,7 @@ class AddQuestionFSM(StatesGroup):
 class AdminFSM(StatesGroup):
     toggle_question = State()
     grant_admin = State()
+    bulk_import = State()
 
 
 class UnlimitedFSM(StatesGroup):
@@ -100,6 +102,133 @@ async def send_next_question(message: Message, tg_id: int) -> None:
         return
     await message.answer(question_text(question), reply_markup=answers_kb(question["id"]))
 
+
+
+
+def _split_bulk_blocks(raw_text: str) -> list[str]:
+    blocks: list[str] = []
+    current: list[str] = []
+    for line in raw_text.splitlines():
+        if line.strip() == "---":
+            block = "\n".join(current).strip()
+            if block:
+                blocks.append(block)
+            current = []
+            continue
+        current.append(line)
+    tail = "\n".join(current).strip()
+    if tail:
+        blocks.append(tail)
+    return blocks
+
+
+def _parse_bool(value: str) -> bool | None:
+    normalized = value.strip().lower()
+    if normalized in {"true", "1", "yes", "y", "да"}:
+        return True
+    if normalized in {"false", "0", "no", "n", "нет"}:
+        return False
+    return None
+
+
+def _resolve_topic_id(topic_raw: str) -> int:
+    topic_value = topic_raw.strip()
+    if topic_value.isdigit():
+        rows = db.client.table("topics").select("id").eq("id", int(topic_value)).limit(1).execute().data or []
+        if not rows:
+            raise ValueError("TOPIC: тема с таким ID не найдена")
+        return int(topic_value)
+
+    rows = db.client.table("topics").select("id").eq("title", topic_value).limit(1).execute().data or []
+    if rows:
+        return int(rows[0]["id"])
+
+    created = db.client.table("topics").insert({"title": topic_value, "is_active": True}).execute().data or []
+    if not created:
+        raise ValueError("TOPIC: не удалось создать тему")
+    return int(created[0]["id"])
+
+
+def _parse_bulk_block(block: str) -> dict:
+    payload: dict = {"is_active": True}
+    options: dict[str, str] = {}
+
+    for raw_line in block.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        option_match = re.match(r"^([ABCD])\)\s*(.+)$", line, flags=re.IGNORECASE)
+        if option_match:
+            letter = option_match.group(1).upper()
+            options[letter] = option_match.group(2).strip()
+            continue
+
+        q_match = re.match(r"^[QВ]\s*:\s*(.+)$", line, flags=re.IGNORECASE)
+        if q_match:
+            payload["text"] = q_match.group(1).strip()
+            continue
+
+        field_match = re.match(r"^([A-Z_]+)\s*:\s*(.+)$", line, flags=re.IGNORECASE)
+        if not field_match:
+            raise ValueError(f"непонятная строка: {line}")
+
+        key = field_match.group(1).upper()
+        value = field_match.group(2).strip()
+
+        if key == "ANS":
+            answer_letter = value.upper()
+            if answer_letter not in {"A", "B", "C", "D"}:
+                raise ValueError("ANS должен быть A/B/C/D")
+            payload["correct_option"] = {"A": 1, "B": 2, "C": 3, "D": 4}[answer_letter]
+        elif key == "TOPIC":
+            payload["topic_id"] = _resolve_topic_id(value)
+        elif key == "DIFF":
+            if not value.isdigit() or not (1 <= int(value) <= 5):
+                raise ValueError("DIFF должен быть числом 1..5")
+            payload["difficulty"] = int(value)
+        elif key == "ACTIVE":
+            bool_value = _parse_bool(value)
+            if bool_value is None:
+                raise ValueError("ACTIVE должен быть true/false")
+            payload["is_active"] = bool_value
+        elif key in {"Q", "В"}:
+            payload["text"] = value
+        else:
+            raise ValueError(f"неизвестное поле {key}")
+
+    if not payload.get("text"):
+        raise ValueError("не заполнен Q")
+
+    for letter in ("A", "B", "C", "D"):
+        if not options.get(letter):
+            raise ValueError(f"отсутствует вариант {letter}")
+
+    if "correct_option" not in payload:
+        raise ValueError("не заполнен ANS")
+
+    payload.update(
+        {
+            "option1": options["A"],
+            "option2": options["B"],
+            "option3": options["C"],
+            "option4": options["D"],
+        }
+    )
+    return payload
+
+
+def _bulk_import_report(total: int, ok_count: int, errors: list[str]) -> str:
+    lines = [
+        "Импорт завершён.",
+        f"Успешно добавлено: {ok_count}",
+        f"С ошибками: {len(errors)} из {total}",
+    ]
+    if errors:
+        lines.append("")
+        lines.append("Первые ошибки:")
+        lines.extend(errors[:3])
+    return "\n".join(lines)
 
 def _stats_message(st: dict) -> str:
     until = st["unlimited_until"].isoformat() if st["unlimited_until"] else "нет"
@@ -484,6 +613,49 @@ async def admin_add_question(callback: CallbackQuery, state: FSMContext) -> None
     await state.set_state(AddQuestionFSM.text)
     await callback.message.answer("Текст вопроса?")
     await callback.answer()
+
+
+@dp.callback_query(F.data == "admin:bulk_import")
+async def admin_bulk_import_prompt(callback: CallbackQuery, state: FSMContext) -> None:
+    if not admin_logic.has_admin_access(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(AdminFSM.bulk_import)
+    await callback.message.answer(
+        "Отправь текст импорта. Один блок = один вопрос, разделитель блоков: ---\n\n"
+        "Формат:\n"
+        "Q: <текст вопроса>\n"
+        "A) <вариант 1>\nB) <вариант 2>\nC) <вариант 3>\nD) <вариант 4>\n"
+        "ANS: <A|B|C|D>\nTOPIC: <необязательно>\nDIFF: <1-5 необязательно>\nACTIVE: <true|false необязательно>"
+    )
+    await callback.answer()
+
+
+@dp.message(AdminFSM.bulk_import)
+async def admin_bulk_import_input(message: Message, state: FSMContext) -> None:
+    if not admin_logic.has_admin_access(message.from_user.id):
+        await state.clear()
+        return
+
+    blocks = _split_bulk_blocks((message.text or "").strip())
+    if not blocks:
+        await message.answer("Не нашёл ни одного блока для импорта")
+        return
+
+    ok_count = 0
+    errors: list[str] = []
+
+    for idx, block in enumerate(blocks, start=1):
+        try:
+            payload = _parse_bulk_block(block)
+            db.client.table("questions").insert(payload).execute()
+            ok_count += 1
+        except Exception as exc:
+            errors.append(f"Блок {idx}: {exc}")
+
+    await state.clear()
+    await message.answer(_bulk_import_report(total=len(blocks), ok_count=ok_count, errors=errors))
 
 
 @dp.callback_query(F.data == "admin:list_questions")

@@ -60,14 +60,38 @@ create table if not exists public.user_settings (
 - `/rating` — топ-50
 - `/stats` — персональная статистика
 - `/my_payments` — мои покупки и последние платежи
-- `/admin` — админ-меню (добавление вопроса, последние 10, toggle активности, выдача админки)
+- `/admin` — админ-меню (добавление вопроса, импорт пачкой, последние 10, toggle активности, выдача админки)
 - `/admin_stats`, `/grant_admin`, `/revoke_admin`, `/add_question`, `/toggle_question` — служебные админ-команды
 - `/test_pay_pack10`, `/test_pay_unlimited30` — тестовые платежи (только при `TEST_MODE=true` и только для админов)
 
 ## Добавление вопросов
 - Через `/admin` → «Добавить вопрос» (FSM с опциональными topic/difficulty)
+- Через `/admin` → «Импорт вопросов (пачкой)»
 - Через `/add_question` (быстрый вход в тот же FSM)
 - Через Supabase SQL editor (используйте поля `topic_id`, `difficulty`, `text`, `option1..4`, `correct_option`, `is_active`)
+
+### Пример импорта вопросов пачкой
+
+```text
+Q: Сколько будет 2 + 2?
+A) 3
+B) 4
+C) 5
+D) 22
+ANS: B
+TOPIC: Арифметика
+DIFF: 1
+ACTIVE: true
+---
+
+В: Столица Франции?
+A) Берлин
+B) Мадрид
+C) Париж
+D) Рим
+ANS: C
+---
+```
 
 ## Монетизация Telegram Stars
 
