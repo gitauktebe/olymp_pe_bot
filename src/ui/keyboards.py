@@ -1,11 +1,11 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
 
-def start_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="Начать")], [KeyboardButton(text="Настройки безлимита")]],
-        resize_keyboard=True,
-    )
+def start_kb(has_unlimited: bool = False) -> ReplyKeyboardMarkup:
+    keyboard = [[KeyboardButton(text="Начать")], [KeyboardButton(text="Мои покупки")]]
+    if has_unlimited:
+        keyboard.append([KeyboardButton(text="Настройки безлимита")])
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 
 def answers_kb(question_id: int) -> InlineKeyboardMarkup:
