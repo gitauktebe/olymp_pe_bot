@@ -226,8 +226,13 @@ def _parse_bulk_block(block: str) -> dict:
     if "correct_option" not in payload:
         raise ValueError("не заполнен ANS")
 
+    options_list = [options["A"], options["B"], options["C"], options["D"]]
     payload.update(
         {
+            "type": "single",
+            "prompt": payload["text"],
+            "options": options_list,
+            "answer": {"correct": [payload["correct_option"]]},
             "option1": options["A"],
             "option2": options["B"],
             "option3": options["C"],
@@ -631,6 +636,59 @@ async def admin_menu(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await callback.message.answer("Админ-меню:", reply_markup=admin_menu_kb())
     await callback.answer()
+
+
+@dp.callback_query(F.data == "admin:bulk_import")
+async def admin_bulk_import_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not admin_logic.has_admin_access(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    await state.set_state(AdminFSM.bulk_import)
+    await callback.message.answer(
+        "Отправьте вопросы пачкой. Один блок = один вопрос, разделитель блоков — строка ---\n\n"
+        "Поддерживаемый формат:\n"
+        "Q: <текст вопроса>\n"
+        "A) <вариант 1>\n"
+        "B) <вариант 2>\n"
+        "C) <вариант 3>\n"
+        "D) <вариант 4>\n"
+        "ANS: <A|B|C|D>\n"
+        "TOPIC: <необязательно>\n"
+        "DIFF: <1-5 необязательно>\n"
+        "ACTIVE: <true|false необязательно, по умолчанию true>"
+    )
+    await callback.answer()
+
+
+@dp.message(AdminFSM.bulk_import)
+async def admin_bulk_import_input(message: Message, state: FSMContext) -> None:
+    if not admin_logic.has_admin_access(message.from_user.id):
+        await state.clear()
+        return
+
+    raw_text = message.text or ""
+    if raw_text.strip().lower() in {"/cancel", "отмена"}:
+        await state.clear()
+        await message.answer("Импорт отменён")
+        return
+
+    blocks = _split_bulk_blocks(raw_text)
+    if not blocks:
+        await message.answer("Не найдено ни одного блока. Проверьте формат и разделитель ---")
+        return
+
+    ok_count = 0
+    errors: list[str] = []
+    for idx, block in enumerate(blocks, start=1):
+        try:
+            payload = _parse_bulk_block(block)
+            db.client.table("questions").insert(payload).execute()
+            ok_count += 1
+        except Exception as exc:
+            errors.append(f"#{idx}: {exc}")
+
+    await message.answer(_bulk_import_report(total=len(blocks), ok_count=ok_count, errors=errors))
+    await state.clear()
 
 
 class AddQuestionTypeSingleFSM(StatesGroup):
