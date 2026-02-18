@@ -60,11 +60,13 @@ create table if not exists public.user_settings (
 - `/rating` — топ-50
 - `/stats` — персональная статистика
 - `/my_payments` — мои покупки и последние платежи
-- `/admin_stats`, `/grant_admin`, `/revoke_admin`, `/add_question`, `/toggle_question` — админка
+- `/admin` — админ-меню (добавление вопроса, последние 10, toggle активности, выдача админки)
+- `/admin_stats`, `/grant_admin`, `/revoke_admin`, `/add_question`, `/toggle_question` — служебные админ-команды
 - `/test_pay_pack10`, `/test_pay_unlimited30` — тестовые платежи (только при `TEST_MODE=true` и только для админов)
 
 ## Добавление вопросов
-- Через `/add_question` (диалог в боте)
+- Через `/admin` → «Добавить вопрос» (FSM с опциональными topic/difficulty)
+- Через `/add_question` (быстрый вход в тот же FSM)
 - Через Supabase SQL editor (используйте поля `topic_id`, `difficulty`, `text`, `option1..4`, `correct_option`, `is_active`)
 
 ## Монетизация Telegram Stars

@@ -16,7 +16,15 @@ from src.config import settings
 from src.db import db
 from src.logic import admin as admin_logic
 from src.logic import entitlements, payments, quiz, rating
-from src.ui.keyboards import answers_kb, buy_kb, next_question_kb, rating_type_kb, start_kb, unlimited_settings_kb
+from src.ui.keyboards import (
+    admin_menu_kb,
+    answers_kb,
+    buy_kb,
+    next_question_kb,
+    rating_type_kb,
+    start_kb,
+    unlimited_settings_kb,
+)
 from src.ui.texts import BLOCKED, DAILY_DONE, NO_QUESTIONS, WELCOME, WRONG_STOP, question_text
 
 logging.basicConfig(level=logging.INFO)
@@ -30,14 +38,19 @@ dp = Dispatcher()
 
 
 class AddQuestionFSM(StatesGroup):
-    topic_id = State()
-    difficulty = State()
     text = State()
     option1 = State()
     option2 = State()
     option3 = State()
     option4 = State()
     correct_option = State()
+    topic = State()
+    difficulty = State()
+
+
+class AdminFSM(StatesGroup):
+    toggle_question = State()
+    grant_admin = State()
 
 
 class UnlimitedFSM(StatesGroup):
@@ -454,6 +467,113 @@ async def cmd_admin_stats(message: Message) -> None:
     )
 
 
+@dp.message(Command("admin"))
+async def cmd_admin(message: Message, state: FSMContext) -> None:
+    if not admin_logic.has_admin_access(message.from_user.id):
+        return
+    await state.clear()
+    await message.answer("Админ-меню:", reply_markup=admin_menu_kb())
+
+
+@dp.callback_query(F.data == "admin:add_question")
+async def admin_add_question(callback: CallbackQuery, state: FSMContext) -> None:
+    if not admin_logic.has_admin_access(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(AddQuestionFSM.text)
+    await callback.message.answer("Текст вопроса?")
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "admin:list_questions")
+async def admin_list_questions(callback: CallbackQuery) -> None:
+    if not admin_logic.has_admin_access(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+
+    rows = (
+        db.client.table("questions")
+        .select("id,text,is_active")
+        .order("id", desc=True)
+        .limit(10)
+        .execute()
+        .data
+        or []
+    )
+    if not rows:
+        await callback.message.answer("Вопросов пока нет")
+    else:
+        lines = ["Последние 10 вопросов:"]
+        for row in rows:
+            status = "✅" if row.get("is_active") else "⛔"
+            text = (row.get("text") or "").replace("\n", " ").strip()
+            short_text = text[:70] + "..." if len(text) > 70 else text
+            lines.append(f"{row['id']}. {status} {short_text}")
+        await callback.message.answer("\n".join(lines))
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "admin:toggle_question")
+async def admin_toggle_prompt(callback: CallbackQuery, state: FSMContext) -> None:
+    if not admin_logic.has_admin_access(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    await state.set_state(AdminFSM.toggle_question)
+    await callback.message.answer("Отправь ID вопроса для переключения is_active")
+    await callback.answer()
+
+
+@dp.message(AdminFSM.toggle_question)
+async def admin_toggle_question(message: Message, state: FSMContext) -> None:
+    if not admin_logic.has_admin_access(message.from_user.id):
+        await state.clear()
+        return
+
+    text = (message.text or "").strip()
+    if not text.isdigit():
+        await message.answer("Нужен числовой ID вопроса")
+        return
+
+    qid = int(text)
+    rows = db.client.table("questions").select("id,is_active").eq("id", qid).limit(1).execute().data or []
+    if not rows:
+        await message.answer("Вопрос не найден")
+        return
+
+    is_active = bool(rows[0]["is_active"])
+    db.client.table("questions").update({"is_active": not is_active}).eq("id", qid).execute()
+    await state.clear()
+    await message.answer(f"Статус вопроса {qid}: {'активен' if not is_active else 'выключен'}")
+
+
+@dp.callback_query(F.data == "admin:grant_admin")
+async def admin_grant_prompt(callback: CallbackQuery, state: FSMContext) -> None:
+    if not admin_logic.has_admin_access(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    await state.set_state(AdminFSM.grant_admin)
+    await callback.message.answer("Отправь tg_id нового админа")
+    await callback.answer()
+
+
+@dp.message(AdminFSM.grant_admin)
+async def admin_grant_input(message: Message, state: FSMContext) -> None:
+    if not admin_logic.has_admin_access(message.from_user.id):
+        await state.clear()
+        return
+
+    text = (message.text or "").strip()
+    if not text.isdigit():
+        await message.answer("Нужен числовой tg_id")
+        return
+
+    target = int(text)
+    ok = admin_logic.grant_admin(message.from_user.id, target, "editor")
+    await state.clear()
+    await message.answer("Админка выдана (role=editor)" if ok else "Недостаточно прав")
+
+
 @dp.message(Command("grant_admin"))
 async def cmd_grant_admin(message: Message) -> None:
     parts = message.text.split()
@@ -481,76 +601,117 @@ async def cmd_revoke_admin(message: Message) -> None:
 async def cmd_add_question(message: Message, state: FSMContext) -> None:
     if not admin_logic.has_admin_access(message.from_user.id):
         return
-    await state.set_state(AddQuestionFSM.topic_id)
-    await message.answer("ID темы?")
-
-
-@dp.message(AddQuestionFSM.topic_id)
-async def aq_topic(message: Message, state: FSMContext) -> None:
-    await state.update_data(topic_id=int(message.text))
-    await state.set_state(AddQuestionFSM.difficulty)
-    await message.answer("Сложность 1..5?")
-
-
-@dp.message(AddQuestionFSM.difficulty)
-async def aq_diff(message: Message, state: FSMContext) -> None:
-    await state.update_data(difficulty=int(message.text))
+    await state.clear()
     await state.set_state(AddQuestionFSM.text)
     await message.answer("Текст вопроса?")
 
 
 @dp.message(AddQuestionFSM.text)
 async def aq_text(message: Message, state: FSMContext) -> None:
-    await state.update_data(text=message.text)
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("Текст не должен быть пустым")
+        return
+    await state.update_data(text=text)
     await state.set_state(AddQuestionFSM.option1)
     await message.answer("Вариант 1?")
 
 
 @dp.message(AddQuestionFSM.option1)
 async def aq_o1(message: Message, state: FSMContext) -> None:
-    await state.update_data(option1=message.text)
+    await state.update_data(option1=(message.text or "").strip())
     await state.set_state(AddQuestionFSM.option2)
     await message.answer("Вариант 2?")
 
 
 @dp.message(AddQuestionFSM.option2)
 async def aq_o2(message: Message, state: FSMContext) -> None:
-    await state.update_data(option2=message.text)
+    await state.update_data(option2=(message.text or "").strip())
     await state.set_state(AddQuestionFSM.option3)
     await message.answer("Вариант 3?")
 
 
 @dp.message(AddQuestionFSM.option3)
 async def aq_o3(message: Message, state: FSMContext) -> None:
-    await state.update_data(option3=message.text)
+    await state.update_data(option3=(message.text or "").strip())
     await state.set_state(AddQuestionFSM.option4)
     await message.answer("Вариант 4?")
 
 
 @dp.message(AddQuestionFSM.option4)
 async def aq_o4(message: Message, state: FSMContext) -> None:
-    await state.update_data(option4=message.text)
+    await state.update_data(option4=(message.text or "").strip())
     await state.set_state(AddQuestionFSM.correct_option)
     await message.answer("Правильный вариант (1..4)?")
 
 
 @dp.message(AddQuestionFSM.correct_option)
+async def aq_correct(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if text not in {"1", "2", "3", "4"}:
+        await message.answer("Нужно число 1..4")
+        return
+    await state.update_data(correct_option=int(text))
+    rows = db.client.table("topics").select("id,title").eq("is_active", True).order("id").limit(100).execute().data or []
+    if rows:
+        topic_lines = [f"{row['id']}: {row['title']}" for row in rows]
+        await message.answer(
+            "Тема (опционально): отправь ID из списка или название новой темы. Для пропуска отправь -\n"
+            + "\n".join(topic_lines)
+        )
+    else:
+        await message.answer("Тема (опционально): отправь название новой темы или '-' для пропуска")
+    await state.set_state(AddQuestionFSM.topic)
+
+
+@dp.message(AddQuestionFSM.topic)
+async def aq_topic(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    topic_id = None
+    if text and text != "-":
+        if text.isdigit():
+            rows = db.client.table("topics").select("id").eq("id", int(text)).limit(1).execute().data or []
+            if not rows:
+                await message.answer("Тема с таким ID не найдена")
+                return
+            topic_id = int(text)
+        else:
+            created = db.client.table("topics").insert({"title": text, "is_active": True}).execute().data or []
+            if not created:
+                await message.answer("Не удалось создать тему")
+                return
+            topic_id = int(created[0]["id"])
+    await state.update_data(topic_id=topic_id)
+    await state.set_state(AddQuestionFSM.difficulty)
+    await message.answer("Сложность 1..5 (опционально), или '-' для пропуска")
+
+
+@dp.message(AddQuestionFSM.difficulty)
 async def aq_done(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    difficulty = None
+    if text and text != "-":
+        if not text.isdigit() or not (1 <= int(text) <= 5):
+            await message.answer("Нужно число 1..5 или '-' для пропуска")
+            return
+        difficulty = int(text)
+
     data = await state.get_data()
-    correct_option = int(message.text)
-    db.client.table("questions").insert(
-        {
-            "topic_id": data["topic_id"],
-            "difficulty": data["difficulty"],
-            "text": data["text"],
-            "option1": data["option1"],
-            "option2": data["option2"],
-            "option3": data["option3"],
-            "option4": data["option4"],
-            "correct_option": correct_option,
-            "is_active": True,
-        }
-    ).execute()
+    payload = {
+        "text": data["text"],
+        "option1": data["option1"],
+        "option2": data["option2"],
+        "option3": data["option3"],
+        "option4": data["option4"],
+        "correct_option": data["correct_option"],
+        "is_active": True,
+    }
+    if data.get("topic_id") is not None:
+        payload["topic_id"] = data["topic_id"]
+    if difficulty is not None:
+        payload["difficulty"] = difficulty
+
+    db.client.table("questions").insert(payload).execute()
     await state.clear()
     await message.answer("Вопрос добавлен")
 
