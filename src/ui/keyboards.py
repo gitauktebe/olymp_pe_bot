@@ -6,6 +6,7 @@ def start_kb(has_unlimited: bool = False) -> ReplyKeyboardMarkup:
         [KeyboardButton(text="Начать")],
         [KeyboardButton(text="Меню")],
         [KeyboardButton(text="Моя статистика")],
+        [KeyboardButton(text="Рейтинг")],
         [KeyboardButton(text="Мои покупки")],
     ]
     if has_unlimited:
@@ -51,5 +52,14 @@ def unlimited_settings_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="random", callback_data="setmode:random")],
             [InlineKeyboardButton(text="topic", callback_data="setmode:topic")],
             [InlineKeyboardButton(text="difficulty", callback_data="setmode:difficulty")],
+        ]
+    )
+
+
+def rating_type_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Всего верных", callback_data="rating:total_correct")],
+            [InlineKeyboardButton(text="Лучшая серия", callback_data="rating:best_streak")],
         ]
     )

@@ -18,13 +18,52 @@ def user_stats(tg_id: int) -> dict:
     }
 
 
-def top50() -> list[dict]:
+def top10(metric: str) -> list[dict]:
+    if metric not in {"total_correct", "best_streak"}:
+        raise ValueError("Unsupported leaderboard metric")
+
     return (
         db.client.table("users")
         .select("tg_id,first_name,username,total_correct,best_streak")
-        .order("total_correct", desc=True)
-        .order("best_streak", desc=True)
-        .limit(50)
+        .order(metric, desc=True)
+        .order("tg_id")
+        .limit(10)
         .execute()
         .data
     ) or []
+
+
+def user_rank(tg_id: int, metric: str) -> int:
+    if metric not in {"total_correct", "best_streak"}:
+        raise ValueError("Unsupported leaderboard metric")
+
+    user = (
+        db.client.table("users")
+        .select(f"tg_id,{metric}")
+        .eq("tg_id", tg_id)
+        .single()
+        .execute()
+        .data
+    )
+    user_value = int((user or {}).get(metric, 0))
+
+    better_count = (
+        db.client.table("users")
+        .select("tg_id", count="exact")
+        .gt(metric, user_value)
+        .execute()
+        .count
+        or 0
+    )
+
+    same_with_lower_id = (
+        db.client.table("users")
+        .select("tg_id", count="exact")
+        .eq(metric, user_value)
+        .lt("tg_id", tg_id)
+        .execute()
+        .count
+        or 0
+    )
+
+    return int(better_count + same_with_lower_id + 1)
