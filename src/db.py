@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from typing import Any
 
 import requests
@@ -60,7 +59,6 @@ class Database:
             "tg_id": tg_id,
             "first_name": first_name,
             "username": username,
-            "updated_at": datetime.utcnow().isoformat(),
         }
         self.client.table("users").upsert(payload, on_conflict="tg_id").execute()
 
