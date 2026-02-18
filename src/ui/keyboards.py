@@ -63,3 +63,14 @@ def rating_type_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="Лучшая серия", callback_data="rating:best_streak")],
         ]
     )
+
+
+def admin_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Добавить вопрос", callback_data="admin:add_question")],
+            [InlineKeyboardButton(text="Список последних 10 вопросов", callback_data="admin:list_questions")],
+            [InlineKeyboardButton(text="Включить/выключить вопрос", callback_data="admin:toggle_question")],
+            [InlineKeyboardButton(text="Выдать админку", callback_data="admin:grant_admin")],
+        ]
+    )
