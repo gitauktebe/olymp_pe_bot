@@ -67,7 +67,6 @@ def get_unlimited_until(tg_id: int) -> datetime | None:
         db.client.table("subscriptions")
         .select("unlimited_until")
         .eq("tg_id", tg_id)
-        .order("unlimited_until", desc=True)
         .limit(1)
         .execute()
         .data
