@@ -18,6 +18,7 @@ class Settings:
     pack10_stars: int = 300
     unlimited30_stars: int = 1500
     test_mode: bool = False
+    monetization_enabled: bool = False
     admin_tg_ids: tuple[int, ...] = ()
 
 
@@ -56,5 +57,6 @@ settings = Settings(
     pack10_stars=int(os.getenv("PACK10_STARS", "300")),
     unlimited30_stars=int(os.getenv("UNLIMITED30_STARS", "1500")),
     test_mode=_parse_bool(os.getenv("TEST_MODE")),
+    monetization_enabled=_parse_bool(os.getenv("MONETIZATION_ENABLED")),
     admin_tg_ids=_parse_admin_tg_ids(os.getenv("ADMIN_TG_IDS")),
 )

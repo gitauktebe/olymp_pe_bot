@@ -15,7 +15,7 @@ from aiogram.types import CallbackQuery, LabeledPrice, Message, PreCheckoutQuery
 from src.config import settings
 from src.db import db
 from src.logic import admin as admin_logic
-from src.logic import payments, quiz, rating
+from src.logic import entitlements, payments, quiz, rating
 from src.ui.keyboards import answers_kb, buy_kb, next_pack_kb, start_kb, unlimited_settings_kb
 from src.ui.texts import BLOCKED, NO_QUESTIONS, WELCOME, question_text
 
@@ -53,26 +53,26 @@ async def process_test_payment(message: Message, payload: str, amount: int) -> N
     tg_id = message.from_user.id
     charge_id = f"TEST-{tg_id}-{payload}-{int(datetime.now(timezone.utc).timestamp())}"
 
-    is_new = payments.insert_payment_if_new(
+    result = entitlements.grant_purchase(
         tg_id=tg_id,
+        payload=payload,
+        amount=amount,
         currency="XTR",
-        total_amount=amount,
-        invoice_payload=payload,
-        telegram_payment_charge_id=charge_id,
+        charge_id=charge_id,
+        is_test=True,
     )
-    if not is_new:
+    if result.get("duplicate"):
         await message.answer("🧪 TEST MODE: тестовая оплата уже учтена")
         return
 
     if payload == payments.PACK10_PAYLOAD:
-        payments.grant_pack10(tg_id)
         await message.answer(
             "🧪 TEST MODE: начислено +10 вопросов.",
             reply_markup=start_kb(has_unlimited=quiz.has_unlimited_now(tg_id)),
         )
         return
 
-    until = payments.grant_unlimited_30(tg_id)
+    until = datetime.fromisoformat(result["new_until"])
     until_local = until.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     await message.answer(
         f"🧪 TEST MODE: начислен безлимит до {until_local}.",
@@ -102,10 +102,10 @@ async def begin_quiz(message: Message) -> None:
     tg_id = message.from_user.id
     allowed, reason = quiz.can_start_quiz_now(tg_id)
     if not allowed:
-        await message.answer(reason or BLOCKED, reply_markup=buy_kb())
+        await message.answer(reason or BLOCKED, reply_markup=buy_kb(settings.monetization_enabled))
         return
     if not quiz.consume_pack_if_needed(tg_id):
-        await message.answer("Лимит исчерпан", reply_markup=buy_kb())
+        await message.answer("Лимит исчерпан", reply_markup=buy_kb(settings.monetization_enabled))
         return
     quiz.reset_session(tg_id)
     await send_next_question(message, tg_id)
@@ -134,7 +134,7 @@ async def answer_handler(callback: CallbackQuery) -> None:
     await callback.answer("Принято")
 
     if status == "wrong" and not quiz.has_unlimited_now(tg_id):
-        await callback.message.answer(BLOCKED, reply_markup=buy_kb())
+        await callback.message.answer(BLOCKED, reply_markup=buy_kb(settings.monetization_enabled))
         return
 
     if quiz.package_completed(tg_id):
@@ -185,6 +185,10 @@ async def cmd_stats(message: Message) -> None:
 @dp.callback_query(F.data.startswith("buy:"))
 async def buy_handler(callback: CallbackQuery) -> None:
     kind = callback.data.split(":", maxsplit=1)[1]
+    if not settings.monetization_enabled:
+        await callback.answer("Покупки временно недоступны", show_alert=True)
+        return
+
     if kind == payments.PACK10:
         title = "Пакет +10 вопросов"
         description = "Открывает +10 вопросов прямо сейчас"
@@ -219,6 +223,10 @@ async def successful_payment(message: Message) -> None:
     payload = payment.invoice_payload
     kind = payments.kind_from_payload(payload)
 
+    if not settings.monetization_enabled:
+        logger.info("Ignoring successful_payment while monetization disabled: tg_id=%s payload=%s", tg_id, payload)
+        return
+
     if kind is None:
         await message.answer("Не удалось определить тип покупки. Напиши администратору.")
         return
@@ -236,23 +244,23 @@ async def successful_payment(message: Message) -> None:
         return
 
     try:
-        is_new = payments.insert_payment_if_new(
+        result = entitlements.grant_purchase(
             tg_id=tg_id,
+            payload=payload,
+            amount=payment.total_amount,
             currency=payment.currency,
-            total_amount=payment.total_amount,
-            invoice_payload=payload,
-            telegram_payment_charge_id=payment.telegram_payment_charge_id,
+            charge_id=payment.telegram_payment_charge_id,
+            is_test=False,
         )
-        if not is_new:
+        if result.get("duplicate"):
             await message.answer("Оплата уже учтена ✅")
             return
 
         if kind == payments.PACK10:
-            payments.grant_pack10(tg_id)
             await message.answer("✅ Оплата принята. Добавлено +10 вопросов.", reply_markup=start_kb(has_unlimited=quiz.has_unlimited_now(tg_id)))
             return
 
-        until = payments.grant_unlimited_30(tg_id)
+        until = datetime.fromisoformat(result["new_until"])
         until_local = until.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         await message.answer(
             f"✅ Безлимит активирован до {until_local}.",
@@ -318,7 +326,7 @@ async def my_payments_button(message: Message) -> None:
 @dp.message(F.text == "Настройки безлимита")
 async def unlimited_settings(message: Message) -> None:
     if not quiz.has_unlimited_now(message.from_user.id):
-        await message.answer("Опция доступна только при активном безлимите", reply_markup=buy_kb())
+        await message.answer("Опция доступна только при активном безлимите", reply_markup=buy_kb(settings.monetization_enabled))
         return
     await message.answer("Выбери режим выдачи:", reply_markup=unlimited_settings_kb())
 
