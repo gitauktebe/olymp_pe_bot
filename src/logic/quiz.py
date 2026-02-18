@@ -89,7 +89,7 @@ def get_settings(tg_id: int) -> dict[str, Any]:
 
 
 def _query_questions(settings_row: dict[str, Any]) -> list[dict[str, Any]]:
-    query = db.client.table("questions").select("*").eq("is_active", True)
+    query = db.client.table("questions").select("*").eq("is_active", True).eq("type", "single")
     mode = settings_row.get("mode", "random")
     if mode == "topic" and settings_row.get("topic_id"):
         query = query.eq("topic_id", settings_row["topic_id"])
@@ -132,7 +132,11 @@ def save_answer(tg_id: int, question: dict[str, Any], answer_index: int) -> tupl
     if session.active_question_id != question["id"]:
         return False, "stale_question"
 
-    correct_option = int(question["correct_option"])
+    answer = question.get("answer") or {}
+    if isinstance(answer, dict) and isinstance(answer.get("correct"), list) and answer["correct"]:
+        correct_option = int(answer["correct"][0])
+    else:
+        correct_option = int(question.get("correct_option") or 1)
     is_correct = answer_index == correct_option
 
     db.client.table("answers").insert(
