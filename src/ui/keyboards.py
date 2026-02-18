@@ -69,6 +69,7 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="➕ Добавить вопрос", callback_data="admin:add_question")],
+            [InlineKeyboardButton(text="📥 Импорт вопросов (пачкой)", callback_data="admin:bulk_import")],
             [InlineKeyboardButton(text="📚 Вопросы", callback_data="admin:questions")],
             [InlineKeyboardButton(text="🧩 Темы", callback_data="admin:topics")],
         ]
