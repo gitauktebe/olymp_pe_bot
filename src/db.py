@@ -42,6 +42,21 @@ class Database:
           paid_packs_available integer not null default 0,
           updated_at timestamptz not null default now()
         );
+
+        create table if not exists public.user_day (
+          tg_id bigint not null references public.users(tg_id) on delete cascade,
+          day date not null,
+          correct_count integer not null default 0,
+          wrong_count integer not null default 0,
+          streak_today integer not null default 0,
+          is_blocked boolean not null default false,
+          primary key (tg_id, day)
+        );
+
+        alter table if exists public.user_day add column if not exists streak_today integer not null default 0;
+        alter table if exists public.user_day add column if not exists is_blocked boolean not null default false;
+        alter table if exists public.user_day add column if not exists correct_count integer not null default 0;
+        alter table if exists public.user_day add column if not exists wrong_count integer not null default 0;
         """.strip()
 
         if self._run_sql_via_pg_endpoint(migration_sql):

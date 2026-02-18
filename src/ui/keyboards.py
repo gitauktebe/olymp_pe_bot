@@ -2,7 +2,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardBu
 
 
 def start_kb(has_unlimited: bool = False) -> ReplyKeyboardMarkup:
-    keyboard = [[KeyboardButton(text="Начать")], [KeyboardButton(text="Мои покупки")]]
+    keyboard = [[KeyboardButton(text="Начать")], [KeyboardButton(text="Меню")], [KeyboardButton(text="Мои покупки")]]
     if has_unlimited:
         keyboard.append([KeyboardButton(text="Настройки безлимита")])
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
@@ -11,10 +11,20 @@ def start_kb(has_unlimited: bool = False) -> ReplyKeyboardMarkup:
 def answers_kb(question_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="A1", callback_data=f"ans:{question_id}:1")],
-            [InlineKeyboardButton(text="A2", callback_data=f"ans:{question_id}:2")],
-            [InlineKeyboardButton(text="A3", callback_data=f"ans:{question_id}:3")],
-            [InlineKeyboardButton(text="A4", callback_data=f"ans:{question_id}:4")],
+            [InlineKeyboardButton(text="Ответить: 1", callback_data=f"ans:{question_id}:1")],
+            [InlineKeyboardButton(text="Ответить: 2", callback_data=f"ans:{question_id}:2")],
+            [InlineKeyboardButton(text="Ответить: 3", callback_data=f"ans:{question_id}:3")],
+            [InlineKeyboardButton(text="Ответить: 4", callback_data=f"ans:{question_id}:4")],
+            [InlineKeyboardButton(text="Меню", callback_data="menu")],
+        ]
+    )
+
+
+def next_question_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Следующий", callback_data="next")],
+            [InlineKeyboardButton(text="Меню", callback_data="menu")],
         ]
     )
 
@@ -38,7 +48,3 @@ def unlimited_settings_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="difficulty", callback_data="setmode:difficulty")],
         ]
     )
-
-
-def next_pack_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Следующие 10", callback_data="next10")]])

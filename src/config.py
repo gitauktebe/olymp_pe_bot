@@ -14,7 +14,7 @@ class Settings:
     supabase_url: str
     supabase_anon_key: str
     supabase_service_role_key: str
-    timezone: str = "Europe/Berlin"
+    timezone: str = "Europe/Moscow"
     pack10_stars: int = 300
     unlimited30_stars: int = 1500
     test_mode: bool = False
@@ -53,7 +53,7 @@ settings = Settings(
     supabase_url=_required("SUPABASE_URL"),
     supabase_anon_key=os.getenv("SUPABASE_ANON_KEY", "").strip(),
     supabase_service_role_key=_required("SUPABASE_SERVICE_ROLE_KEY"),
-    timezone=os.getenv("TIMEZONE", "Europe/Berlin").strip() or "Europe/Berlin",
+    timezone=os.getenv("TIMEZONE", "Europe/Moscow").strip() or "Europe/Moscow",
     pack10_stars=int(os.getenv("PACK10_STARS", "300")),
     unlimited30_stars=int(os.getenv("UNLIMITED30_STARS", "1500")),
     test_mode=_parse_bool(os.getenv("TEST_MODE")),

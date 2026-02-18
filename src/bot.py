@@ -16,8 +16,8 @@ from src.config import settings
 from src.db import db
 from src.logic import admin as admin_logic
 from src.logic import entitlements, payments, quiz, rating
-from src.ui.keyboards import answers_kb, buy_kb, next_pack_kb, start_kb, unlimited_settings_kb
-from src.ui.texts import BLOCKED, NO_QUESTIONS, WELCOME, question_text
+from src.ui.keyboards import answers_kb, buy_kb, next_question_kb, start_kb, unlimited_settings_kb
+from src.ui.texts import BLOCKED, DAILY_DONE, NO_QUESTIONS, WELCOME, WRONG_STOP, question_text
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -91,10 +91,19 @@ async def send_next_question(message: Message, tg_id: int) -> None:
 @dp.message(Command("start"))
 async def cmd_start(message: Message) -> None:
     user = message.from_user
-    db.upsert_user(user.id, user.first_name, user.username)
-    db.ensure_user_settings(user.id)
-    quiz.ensure_day_row(user.id)
-    await message.answer(WELCOME, reply_markup=start_kb(has_unlimited=quiz.has_unlimited_now(user.id)))
+    tg_id = user.id
+    db.upsert_user(tg_id, user.first_name, user.username)
+    db.ensure_user_settings(tg_id)
+    quiz.ensure_day_row(tg_id)
+
+    allowed, reason = quiz.can_start_quiz_now(tg_id)
+    if not allowed:
+        await message.answer(f"{WELCOME}\n\n{reason}", reply_markup=start_kb(has_unlimited=quiz.has_unlimited_now(tg_id)))
+        return
+
+    quiz.reset_session(tg_id)
+    await message.answer(WELCOME, reply_markup=start_kb(has_unlimited=quiz.has_unlimited_now(tg_id)))
+    await send_next_question(message, tg_id)
 
 
 @dp.message(F.text == "Начать")
@@ -102,10 +111,7 @@ async def begin_quiz(message: Message) -> None:
     tg_id = message.from_user.id
     allowed, reason = quiz.can_start_quiz_now(tg_id)
     if not allowed:
-        await message.answer(reason or BLOCKED, reply_markup=buy_kb(settings.monetization_enabled))
-        return
-    if not quiz.consume_pack_if_needed(tg_id):
-        await message.answer("Лимит исчерпан", reply_markup=buy_kb(settings.monetization_enabled))
+        await message.answer(reason or BLOCKED, reply_markup=start_kb(has_unlimited=quiz.has_unlimited_now(tg_id)))
         return
     quiz.reset_session(tg_id)
     await send_next_question(message, tg_id)
@@ -133,23 +139,42 @@ async def answer_handler(callback: CallbackQuery) -> None:
 
     await callback.answer("Принято")
 
-    if status == "wrong" and not quiz.has_unlimited_now(tg_id):
-        await callback.message.answer(BLOCKED, reply_markup=buy_kb(settings.monetization_enabled))
+    if status == "blocked":
+        await callback.message.answer(WRONG_STOP, reply_markup=start_kb(has_unlimited=quiz.has_unlimited_now(tg_id)))
         return
 
-    if quiz.package_completed(tg_id):
-        quiz.reset_package_progress(tg_id)
-        if quiz.has_unlimited_now(tg_id):
-            await callback.message.answer("Пакет завершён", reply_markup=next_pack_kb())
-            return
+    if status == "daily_done":
+        await callback.message.answer(DAILY_DONE, reply_markup=start_kb(has_unlimited=quiz.has_unlimited_now(tg_id)))
+        return
 
+    if status == "correct":
+        await callback.message.answer("Верно ✅", reply_markup=next_question_kb())
+        return
+
+    await callback.message.answer("Есть ошибка.", reply_markup=start_kb(has_unlimited=quiz.has_unlimited_now(tg_id)))
+
+
+@dp.callback_query(F.data == "next")
+async def next_handler(callback: CallbackQuery) -> None:
+    tg_id = callback.from_user.id
+    allowed, reason = quiz.can_start_quiz_now(tg_id)
+    if not allowed:
+        await callback.message.answer(reason or BLOCKED, reply_markup=start_kb(has_unlimited=quiz.has_unlimited_now(tg_id)))
+        await callback.answer()
+        return
+    await callback.answer()
     await send_next_question(callback.message, tg_id)
 
 
-@dp.callback_query(F.data == "next10")
-async def next10_handler(callback: CallbackQuery) -> None:
+@dp.callback_query(F.data == "menu")
+async def menu_handler(callback: CallbackQuery) -> None:
     await callback.answer()
-    await send_next_question(callback.message, callback.from_user.id)
+    await callback.message.answer("Открыл меню", reply_markup=start_kb(has_unlimited=quiz.has_unlimited_now(callback.from_user.id)))
+
+
+@dp.message(F.text == "Меню")
+async def menu_button(message: Message) -> None:
+    await message.answer("Выбери действие", reply_markup=start_kb(has_unlimited=quiz.has_unlimited_now(message.from_user.id)))
 
 
 @dp.message(Command("rating"))

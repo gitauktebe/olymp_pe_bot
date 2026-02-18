@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 from src.db import db
-from src.logic.quiz import get_unlimited_until
+from src.logic.quiz import ensure_day_row, get_unlimited_until
 
 
 def user_stats(tg_id: int) -> dict:
-    user = db.client.table("users").select("total_answers,total_correct,best_streak,current_streak").eq("tg_id", tg_id).single().execute().data
+    user = db.client.table("users").select("total_answers,total_correct,best_streak").eq("tg_id", tg_id).single().execute().data
+    day = ensure_day_row(tg_id)
     return {
         "total_answers": int(user.get("total_answers", 0)),
         "total_correct": int(user.get("total_correct", 0)),
         "best_streak": int(user.get("best_streak", 0)),
-        "streak_today": int(user.get("current_streak", 0)),
+        "streak_today": int(day.get("streak_today", 0)),
         "unlimited_until": get_unlimited_until(tg_id),
     }
 
