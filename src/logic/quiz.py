@@ -10,13 +10,12 @@ import pytz
 from src.config import settings
 from src.db import db
 
-PACKAGE_SIZE = 10
+DAILY_LIMIT = 10
 
 
 @dataclass
 class RuntimeSession:
     asked_ids: set[int] = field(default_factory=set)
-    package_progress: int = 0
     active_question_id: int | None = None
     answered_active: bool = False
 
@@ -47,14 +46,15 @@ def reset_session(tg_id: int) -> None:
     runtime_sessions[tg_id] = RuntimeSession()
 
 
-def ensure_day_row(tg_id: int) -> dict[str, Any]:
-    day = _today_str()
+def ensure_day_row(tg_id: int, day: str | None = None) -> dict[str, Any]:
+    day = day or _today_str()
     db.client.table("user_day").upsert(
         {
             "tg_id": tg_id,
             "day": day,
             "correct_count": 0,
             "wrong_count": 0,
+            "streak_today": 0,
             "is_blocked": False,
         },
         on_conflict="tg_id,day",
@@ -117,31 +117,12 @@ def can_start_quiz_now(tg_id: int) -> tuple[bool, str | None]:
     if has_unlimited_now(tg_id):
         return True, None
 
-    settings_row = get_settings(tg_id)
-    if int(settings_row.get("paid_packs_available", 0)) > 0:
-        return True, None
-
     day_row = ensure_day_row(tg_id)
     if day_row.get("is_blocked"):
-        return False, "Отдохни, продолжим завтра"
+        return False, "На сегодня достаточно. Отдыхай до завтра 😴"
+    if int(day_row.get("correct_count", 0)) >= DAILY_LIMIT:
+        return False, "10/10 на сегодня выполнено. Возвращайся завтра ✅"
     return True, None
-
-
-def consume_pack_if_needed(tg_id: int) -> bool:
-    if has_unlimited_now(tg_id):
-        return True
-
-    day_row = ensure_day_row(tg_id)
-    if day_row.get("is_blocked"):
-        settings_row = get_settings(tg_id)
-        available = int(settings_row.get("paid_packs_available", 0))
-        if available <= 0:
-            return False
-        db.client.table("user_settings").update(
-            {"paid_packs_available": available - 1, "updated_at": datetime.utcnow().isoformat()}
-        ).eq("tg_id", tg_id).execute()
-        db.client.table("user_day").update({"is_blocked": False}).eq("tg_id", tg_id).eq("day", _today_str()).execute()
-    return True
 
 
 def save_answer(tg_id: int, question: dict[str, Any], answer_index: int) -> tuple[bool, str]:
@@ -165,12 +146,16 @@ def save_answer(tg_id: int, question: dict[str, Any], answer_index: int) -> tupl
     ).execute()
 
     day_row = ensure_day_row(tg_id)
+    unlimited = has_unlimited_now(tg_id)
     updates = {
         "correct_count": int(day_row.get("correct_count", 0)) + (1 if is_correct else 0),
         "wrong_count": int(day_row.get("wrong_count", 0)) + (0 if is_correct else 1),
     }
-    if not is_correct and not has_unlimited_now(tg_id):
+    if is_correct:
+        updates["streak_today"] = int(day_row.get("streak_today", 0)) + 1
+    elif not unlimited:
         updates["is_blocked"] = True
+        updates["streak_today"] = 0
     db.client.table("user_day").update(updates).eq("tg_id", tg_id).eq("day", _today_str()).execute()
 
     stats = db.client.table("users").select("total_answers,total_correct,best_streak,current_streak").eq("tg_id", tg_id).single().execute().data
@@ -192,16 +177,11 @@ def save_answer(tg_id: int, question: dict[str, Any], answer_index: int) -> tupl
     ).eq("tg_id", tg_id).execute()
 
     session.answered_active = True
-    session.package_progress += 1
+    if is_correct and (not unlimited) and updates["correct_count"] >= DAILY_LIMIT:
+        return True, "daily_done"
+    if (not is_correct) and (not unlimited):
+        return True, "blocked"
     return True, "correct" if is_correct else "wrong"
-
-
-def package_completed(tg_id: int) -> bool:
-    return get_or_create_session(tg_id).package_progress >= PACKAGE_SIZE
-
-
-def reset_package_progress(tg_id: int) -> None:
-    get_or_create_session(tg_id).package_progress = 0
 
 
 def get_question_by_id(question_id: int) -> dict[str, Any] | None:
