@@ -72,7 +72,7 @@ create table if not exists public.user_settings (
 - Через `/admin` → «Добавить вопрос» (FSM с опциональными topic/difficulty)
 - Через `/admin` → «Импорт вопросов (пачкой)»
 - Через `/add_question` (быстрый вход в тот же FSM)
-- Через Supabase SQL editor (используйте поля `topic_id`, `difficulty`, `text`, `option1..4`, `correct_option`, `is_active`)
+- Через Supabase SQL editor (используйте поля `topic_id`, `difficulty`, `q`, `a1..a4`, `correct`, `is_active`)
 
 ### Пример импорта вопросов пачкой
 
@@ -83,7 +83,7 @@ B) 4
 C) 5
 D) 22
 ANS: B
-TOPIC: Арифметика
+TOPIC_ID: 1
 DIFF: 1
 ACTIVE: true
 ---
@@ -104,7 +104,7 @@ D) ->
 ANS: B
 ```
 
-Во втором блоке `TOPIC`, `DIFF` и `ACTIVE` не указаны — вопрос сохранится с `topic_id = null`, `difficulty = null` и `is_active = true`.
+Во втором блоке `TOPIC_ID`, `DIFF` и `ACTIVE` не указаны — вопрос сохранится с `topic_id = null`, `difficulty = null` и `is_active = true`.
 
 ## Монетизация Telegram Stars
 

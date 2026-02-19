@@ -138,20 +138,11 @@ def _parse_bool(value: str) -> bool | None:
 
 def _resolve_topic_id(topic_raw: str) -> int:
     topic_value = topic_raw.strip()
-    if topic_value.isdigit():
-        rows = db.client.table("topics").select("id").eq("id", int(topic_value)).limit(1).execute().data or []
-        if not rows:
-            raise ValueError("TOPIC: тема с таким ID не найдена")
-        return int(topic_value)
-
-    rows = db.client.table("topics").select("id").eq("title", topic_value).limit(1).execute().data or []
-    if rows:
-        return int(rows[0]["id"])
-
-    created = db.client.table("topics").insert({"title": topic_value, "is_active": True}).execute().data or []
-    if not created:
-        raise ValueError("TOPIC: не удалось создать тему")
-    return int(created[0]["id"])
+    if not topic_value:
+        raise ValueError("TOPIC_ID: пустое значение")
+    if not topic_value.isdigit():
+        raise ValueError("TOPIC_ID должен быть числом")
+    return int(topic_value)
 
 
 def _parse_bulk_block(block: str) -> dict:
@@ -171,7 +162,7 @@ def _parse_bulk_block(block: str) -> dict:
 
         q_match = re.match(r"^(?:Q|В)\s*:\s*(.+)$", line, flags=re.IGNORECASE)
         if q_match:
-            payload["text"] = q_match.group(1).strip()
+            payload["q"] = q_match.group(1).strip()
             continue
 
         field_match = re.match(r"^([A-ZА-Я_]+)\s*:\s*(.*)$", line, flags=re.IGNORECASE)
@@ -185,8 +176,8 @@ def _parse_bulk_block(block: str) -> dict:
             answer_letter = value.upper()
             if answer_letter not in {"A", "B", "C", "D"}:
                 raise ValueError("ANS должен быть A/B/C/D")
-            payload["correct_option"] = {"A": 1, "B": 2, "C": 3, "D": 4}[answer_letter]
-        elif key == "TOPIC":
+            payload["correct"] = {"A": 1, "B": 2, "C": 3, "D": 4}[answer_letter]
+        elif key == "TOPIC_ID":
             if value:
                 payload["topic_id"] = _resolve_topic_id(value)
         elif key == "DIFF":
@@ -203,41 +194,40 @@ def _parse_bulk_block(block: str) -> dict:
                 raise ValueError("ACTIVE должен быть true/false")
             payload["is_active"] = bool_value
         elif key in {"Q", "В"}:
-            payload["text"] = value
+            payload["q"] = value
         else:
             raise ValueError(f"неизвестное поле {key}")
 
-    if not payload.get("text"):
+    if not payload.get("q"):
         raise ValueError("не заполнен Q")
 
     for letter in ("A", "B", "C", "D"):
         if not options.get(letter):
             raise ValueError(f"отсутствует вариант {letter}")
 
-    if "correct_option" not in payload:
+    if "correct" not in payload:
         raise ValueError("не заполнен ANS")
 
     payload.update(
         {
-            "option1": options["A"],
-            "option2": options["B"],
-            "option3": options["C"],
-            "option4": options["D"],
+            "a1": options["A"],
+            "a2": options["B"],
+            "a3": options["C"],
+            "a4": options["D"],
         }
     )
     return payload
 
 
-def _bulk_import_report(total: int, ok_count: int, errors: list[str]) -> str:
+def _bulk_import_report(ok_count: int, skipped_count: int, errors: list[str]) -> str:
     lines = [
-        "Импорт завершён.",
-        f"Успешно добавлено: {ok_count}",
-        f"С ошибками: {len(errors)} из {total}",
+        f"Импорт: добавлено {ok_count}, ошибок {len(errors)}",
+        f"Пропущено дублей: {skipped_count}",
     ]
     if errors:
         lines.append("")
         lines.append("Первые ошибки:")
-        lines.extend(errors[:3])
+        lines.extend(errors[:5])
     return "\n".join(lines)
 
 def _stats_message(st: dict) -> str:
@@ -637,8 +627,8 @@ async def admin_bulk_import_prompt(callback: CallbackQuery, state: FSMContext) -
         "Формат:\n"
         "Q: <текст вопроса> (или В:)\n"
         "A) <вариант 1>\nB) <вариант 2>\nC) <вариант 3>\nD) <вариант 4>\n"
-        "ANS: <A|B|C|D>\nTOPIC: <необязательно>\nDIFF: <1-5 необязательно>\nACTIVE: <true|false необязательно>\n\n"
-        "Если TOPIC / DIFF не указаны — сохранятся как пустые. ACTIVE по умолчанию true."
+        "ANS: <A|B|C|D>\nTOPIC_ID: <число, необязательно>\nDIFF: <1-5 необязательно>\nACTIVE: <true|false необязательно>\n\n"
+        "Если TOPIC_ID / DIFF не указаны — сохранятся как пустые. ACTIVE по умолчанию true."
     )
     await callback.answer()
 
@@ -655,18 +645,23 @@ async def admin_bulk_import_input(message: Message, state: FSMContext) -> None:
         return
 
     ok_count = 0
+    skipped_count = 0
     errors: list[str] = []
 
     for idx, block in enumerate(blocks, start=1):
         try:
             payload = _parse_bulk_block(block)
+            existing = db.client.table("questions").select("id").eq("q", payload["q"]).limit(1).execute().data or []
+            if existing:
+                skipped_count += 1
+                continue
             db.client.table("questions").insert(payload).execute()
             ok_count += 1
         except Exception as exc:
             errors.append(f"Блок {idx}: {exc}")
 
     await state.clear()
-    await message.answer(_bulk_import_report(total=len(blocks), ok_count=ok_count, errors=errors))
+    await message.answer(_bulk_import_report(ok_count=ok_count, skipped_count=skipped_count, errors=errors))
 
 
 @dp.callback_query(F.data == "admin:list_questions")
