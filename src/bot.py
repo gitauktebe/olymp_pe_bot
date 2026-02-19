@@ -628,7 +628,8 @@ async def admin_bulk_import_prompt(callback: CallbackQuery, state: FSMContext) -
         "Q: <текст вопроса> (или В:)\n"
         "A) <вариант 1>\nB) <вариант 2>\nC) <вариант 3>\nD) <вариант 4>\n"
         "ANS: <A|B|C|D>\nTOPIC_ID: <число, необязательно>\nDIFF: <1-5 необязательно>\nACTIVE: <true|false необязательно>\n\n"
-        "Если TOPIC_ID / DIFF не указаны — сохранятся как пустые. ACTIVE по умолчанию true."
+        "Если TOPIC_ID / DIFF не указаны — сохранятся как пустые. ACTIVE по умолчанию true.",
+        parse_mode=None,
     )
     await callback.answer()
 
