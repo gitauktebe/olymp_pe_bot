@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import logging
 import re
 from datetime import datetime, timezone
@@ -11,7 +13,7 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, LabeledPrice, Message, PreCheckoutQuery
+from aiogram.types import CallbackQuery, Document, LabeledPrice, Message, PreCheckoutQuery
 
 from src.config import settings
 from src.db import db
@@ -53,6 +55,7 @@ class AdminFSM(StatesGroup):
     toggle_question = State()
     grant_admin = State()
     bulk_import = State()
+    file_import = State()
 
 
 class UnlimitedFSM(StatesGroup):
@@ -226,6 +229,177 @@ def _bulk_import_report(ok_count: int, errors: list[str]) -> str:
         lines.append("Первые ошибки:")
         lines.extend(errors[:5])
     return "\n".join(lines)
+
+def _normalize_bool(value: str) -> bool | None:
+    normalized = (value or "").strip().lower()
+    if normalized in {"true", "1", "yes", "y", "да", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "n", "нет", "off"}:
+        return False
+    return None
+
+
+def _parse_correct(value: str) -> int:
+    normalized = (value or "").strip()
+    if not normalized.isdigit():
+        raise ValueError("correct должен быть числом 1..4")
+    parsed = int(normalized)
+    if parsed < 1 or parsed > 4:
+        raise ValueError("correct должен быть в диапазоне 1..4")
+    return parsed
+
+
+def _parse_difficulty(value: str) -> int | None:
+    normalized = (value or "").strip()
+    if not normalized:
+        return None
+    if not normalized.isdigit():
+        raise ValueError("difficulty должен быть числом 1..5")
+    parsed = int(normalized)
+    if parsed < 1 or parsed > 5:
+        raise ValueError("difficulty должен быть в диапазоне 1..5")
+    return parsed
+
+
+def _decode_csv_bytes(data: bytes) -> str:
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return data.decode("cp1251")
+
+
+def _csv_delimiter(sample: str) -> str:
+    semicolons = sample.count(";")
+    commas = sample.count(",")
+    return ";" if semicolons > commas else ","
+
+
+def _topic_id_by_name(topic_name: str, cache: dict[str, int]) -> int:
+    normalized = topic_name.strip()
+    if not normalized:
+        raise ValueError("topic пустой")
+
+    key = normalized.lower()
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+
+    existing = db.client.table("topics").select("id,title").ilike("title", normalized).limit(1).execute().data or []
+
+    if existing:
+        topic_id = int(existing[0]["id"])
+        cache[key] = topic_id
+        return topic_id
+
+    created = db.client.table("topics").insert({"title": normalized, "is_active": True}).execute().data or []
+    if not created:
+        raise ValueError("не удалось создать topic")
+    topic_id = int(created[0]["id"])
+    cache[normalized.lower()] = topic_id
+    logger.info("Создана новая тема при импорте CSV: id=%s title=%s", topic_id, normalized)
+    return topic_id
+
+
+def _row_value(row: dict, key: str) -> str:
+    value = row.get(key)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _build_question_from_csv_row(row: dict, row_number: int, topic_cache: dict[str, int]) -> dict | None:
+    raw_values = [(value or "").strip() for value in row.values() if value is not None]
+    if not any(raw_values):
+        return None
+
+    q = _row_value(row, "q")
+    a1 = _row_value(row, "a1")
+    a2 = _row_value(row, "a2")
+    a3 = _row_value(row, "a3")
+    a4 = _row_value(row, "a4")
+
+    for field_name, field_value in (("q", q), ("a1", a1), ("a2", a2), ("a3", a3), ("a4", a4)):
+        if not field_value:
+            raise ValueError(f"пустое обязательное поле {field_name}")
+
+    correct = _parse_correct(_row_value(row, "correct"))
+
+    is_active_raw = _row_value(row, "is_active")
+    is_active = True if not is_active_raw else _normalize_bool(is_active_raw)
+    if is_active is None:
+        raise ValueError("is_active должен быть boolean")
+
+    payload: dict[str, object] = {
+        "text": q,
+        "option1": a1,
+        "option2": a2,
+        "option3": a3,
+        "option4": a4,
+        "correct_option": correct,
+        "is_active": is_active,
+    }
+
+    topic_id_raw = _row_value(row, "topic_id")
+    topic_name_raw = _row_value(row, "topic")
+    if topic_id_raw:
+        if not topic_id_raw.isdigit():
+            raise ValueError("topic_id должен быть числом")
+        payload["topic_id"] = int(topic_id_raw)
+    elif topic_name_raw:
+        payload["topic_id"] = _topic_id_by_name(topic_name_raw, topic_cache)
+
+    difficulty = _parse_difficulty(_row_value(row, "difficulty"))
+    if difficulty is not None:
+        payload["difficulty"] = difficulty
+
+    logger.info("CSV row %s подготовлен для вставки", row_number)
+    return payload
+
+
+def _iter_chunks(items: list[dict], chunk_size: int = 100):
+    for i in range(0, len(items), chunk_size):
+        yield items[i : i + chunk_size]
+
+
+def _parse_csv_questions(csv_text: str) -> tuple[list[dict], list[str]]:
+    errors: list[str] = []
+    questions: list[dict] = []
+    topic_cache: dict[str, int] = {}
+
+    delimiter = _csv_delimiter(csv_text[:4096])
+    reader = csv.DictReader(io.StringIO(csv_text), delimiter=delimiter)
+    if not reader.fieldnames:
+        return [], ["CSV пустой или без заголовка"]
+
+    normalized_fieldnames = [field.strip().lower() for field in reader.fieldnames]
+    required = {"q", "a1", "a2", "a3", "a4", "correct", "is_active"}
+    missing = sorted(required - set(normalized_fieldnames))
+    if missing:
+        return [], [f"Отсутствуют обязательные колонки: {', '.join(missing)}"]
+
+    for row_index, raw_row in enumerate(reader, start=2):
+        row = {str(k).strip().lower(): (v or "") for k, v in raw_row.items() if k is not None}
+        try:
+            payload = _build_question_from_csv_row(row, row_index, topic_cache)
+            if payload is None:
+                continue
+            questions.append(payload)
+        except Exception as exc:
+            errors.append(f"Строка {row_index}: {exc}")
+
+    return questions, errors
+
+
+def _bulk_insert_questions(payloads: list[dict], errors: list[str]) -> int:
+    inserted = 0
+    for chunk in _iter_chunks(payloads, chunk_size=100):
+        try:
+            db.client.table("questions").insert(chunk).execute()
+            inserted += len(chunk)
+            logger.info("Импорт CSV: вставлен чанк size=%s", len(chunk))
+        except Exception as exc:
+            logger.exception("Импорт CSV: ошибка вставки чанка size=%s", len(chunk))
+            errors.append(f"Ошибка вставки пачки ({len(chunk)} шт): {exc}")
+    return inserted
+
 
 def _stats_message(st: dict) -> str:
     until = st["unlimited_until"].isoformat() if st["unlimited_until"] else "нет"
@@ -662,6 +836,74 @@ async def admin_bulk_import_input(message: Message, state: FSMContext) -> None:
 
     await state.clear()
     await message.answer(_bulk_import_report(ok_count=ok_count, errors=errors))
+
+
+@dp.callback_query(F.data == "admin:file_import")
+async def admin_file_import_prompt(callback: CallbackQuery, state: FSMContext) -> None:
+    if not admin_logic.has_admin_access(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(AdminFSM.file_import)
+    await callback.message.answer(
+        "Прикрепи CSV файлом (document) и отправь в чат. "
+        "Поддерживаются разделители ',' и ';', кодировки UTF-8 и cp1251."
+    )
+    logger.info("Админ %s запустил импорт вопросов файлом", callback.from_user.id)
+    await callback.answer()
+
+
+@dp.message(AdminFSM.file_import)
+async def admin_file_import_input(message: Message, state: FSMContext) -> None:
+    if not admin_logic.has_admin_access(message.from_user.id):
+        await state.clear()
+        return
+
+    document: Document | None = message.document
+    if document is None:
+        await message.answer("Нужен CSV файл как document")
+        return
+
+    if not document.file_name or not document.file_name.lower().endswith(".csv"):
+        await message.answer("Нужен файл с расширением .csv")
+        return
+
+    logger.info(
+        "Старт обработки CSV: admin=%s file_name=%s file_id=%s size=%s",
+        message.from_user.id,
+        document.file_name,
+        document.file_id,
+        document.file_size,
+    )
+
+    try:
+        file = await bot.get_file(document.file_id)
+        content = await bot.download_file(file.file_path)
+        csv_bytes = content.read()
+    except Exception as exc:
+        logger.exception("Ошибка скачивания CSV из Telegram")
+        await message.answer(f"Не удалось скачать файл: {exc}")
+        return
+
+    try:
+        csv_text = _decode_csv_bytes(csv_bytes)
+    except Exception as exc:
+        logger.exception("Ошибка декодирования CSV")
+        await message.answer(f"Не удалось прочитать CSV: {exc}")
+        return
+
+    payloads, errors = _parse_csv_questions(csv_text)
+    inserted = _bulk_insert_questions(payloads, errors) if payloads else 0
+
+    logger.info(
+        "Импорт CSV завершен: admin=%s inserted=%s errors=%s",
+        message.from_user.id,
+        inserted,
+        len(errors),
+    )
+
+    await state.clear()
+    await message.answer(_bulk_import_report(ok_count=inserted, errors=errors), parse_mode=None)
 
 
 @dp.callback_query(F.data == "admin:list_questions")
