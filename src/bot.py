@@ -481,6 +481,9 @@ async def answer_handler(callback: CallbackQuery) -> None:
     if not ok and status == "already_answered":
         await callback.answer("Ответ уже принят")
         return
+    if not ok and status == "save_failed":
+        await callback.answer("Не удалось сохранить ответ", show_alert=True)
+        return
     if not ok:
         await callback.answer("Этот вопрос уже не активен")
         return
