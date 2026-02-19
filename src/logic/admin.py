@@ -7,7 +7,7 @@ ROLE_ORDER = {"editor": 1, "admin": 2, "owner": 3}
 
 
 def get_admin_role(tg_id: int) -> str | None:
-    rows = db.client.table("admins").select("role").eq("telegram_id", tg_id).limit(1).execute().data
+    rows = db.client.table("admins").select("role").eq("tg_id", tg_id).limit(1).execute().data
     return rows[0]["role"] if rows else None
 
 
@@ -31,7 +31,7 @@ def grant_admin(granter_id: int, target_tg_id: int, role: str) -> bool:
         return False
     if not can_grant(granter_id, role):
         return False
-    db.client.table("admins").upsert({"telegram_id": target_tg_id, "role": role}, on_conflict="telegram_id").execute()
+    db.client.table("admins").upsert({"tg_id": target_tg_id, "role": role}, on_conflict="tg_id").execute()
     return True
 
 
@@ -42,7 +42,7 @@ def revoke_admin(granter_id: int, target_tg_id: int) -> bool:
         return False
     if ROLE_ORDER[granter_role] <= ROLE_ORDER[target_role]:
         return False
-    db.client.table("admins").delete().eq("telegram_id", target_tg_id).execute()
+    db.client.table("admins").delete().eq("tg_id", target_tg_id).execute()
     return True
 
 
