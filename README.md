@@ -138,6 +138,9 @@ ADMIN_TG_IDS=123456789,987654321
 
 Обе команды вызывают тот же общий сервис начисления, что и реальная `successful_payment`, поэтому тестовый и боевой флоу синхронизированы.
 
+## Автодеплой
+После merge/push в ветку `main` деплой на VPS запускается автоматически через GitHub Actions workflow **Deploy to VPS**.
+
 ## Ручной деплой с телефона
 GitHub → Actions → **Deploy (manual)** → **Run workflow**.
 
