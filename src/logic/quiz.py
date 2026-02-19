@@ -134,6 +134,33 @@ def can_start_quiz_now(tg_id: int) -> tuple[bool, str | None]:
     return True, None
 
 
+def _build_answer_payload(
+    *,
+    tg_id: int,
+    question_id: int,
+    answer_index: int,
+    is_correct: bool,
+    day: str,
+    mode: str | None = None,
+) -> dict[str, Any]:
+    """
+    Build insert payload for public.answers using only known-compatible columns.
+
+    `mode` is intentionally omitted by default because some deployments do not
+    have a dedicated answers.mode column.
+    """
+    payload: dict[str, Any] = {
+        "tg_id": tg_id,
+        "question_id": question_id,
+        "answer": answer_index,
+        "is_correct": is_correct,
+        "day": day,
+    }
+    if mode:
+        logger.debug("Answer mode=%s is not persisted: answers.mode is schema-optional", mode)
+    return payload
+
+
 def save_answer(tg_id: int, question: dict[str, Any], answer_index: int) -> tuple[bool, str]:
     session = get_or_create_session(tg_id)
     if session.answered_active:
@@ -148,16 +175,26 @@ def save_answer(tg_id: int, question: dict[str, Any], answer_index: int) -> tupl
 
     correct_option = int(normalized_question["correct"])
     is_correct = answer_index == correct_option
-
-    db.client.table("answers").insert(
-        {
-            "tg_id": tg_id,
-            "question_id": question["id"],
-            "selected_option": answer_index,
-            "is_correct": is_correct,
-            "mode": get_settings(tg_id).get("mode", "random"),
-        }
-    ).execute()
+    day = _today_str()
+    payload = _build_answer_payload(
+        tg_id=tg_id,
+        question_id=question["id"],
+        answer_index=answer_index,
+        is_correct=is_correct,
+        day=day,
+        mode=get_settings(tg_id).get("mode"),
+    )
+    try:
+        db.client.table("answers").insert(payload).execute()
+    except Exception as exc:
+        logger.exception(
+            "Failed to insert answer for tg_id=%s question_id=%s payload_keys=%s error=%s",
+            tg_id,
+            question.get("id"),
+            sorted(payload.keys()),
+            exc,
+        )
+        return False, "save_failed"
 
     day_row = ensure_day_row(tg_id)
     unlimited = has_unlimited_now(tg_id)
@@ -170,7 +207,7 @@ def save_answer(tg_id: int, question: dict[str, Any], answer_index: int) -> tupl
     elif not unlimited:
         updates["is_blocked"] = True
         updates["streak_today"] = 0
-    db.client.table("user_day").update(updates).eq("tg_id", tg_id).eq("day", _today_str()).execute()
+    db.client.table("user_day").update(updates).eq("tg_id", tg_id).eq("day", day).execute()
 
     stats = db.client.table("users").select("total_answers,total_correct,total_wrong,best_streak").eq("tg_id", tg_id).single().execute().data
     best_streak = int(stats.get("best_streak", 0))
