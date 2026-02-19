@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 from typing import Any
@@ -9,6 +10,9 @@ import pytz
 
 from src.config import settings
 from src.db import db
+from src.logic.question_schema import normalize_question
+
+logger = logging.getLogger(__name__)
 
 DAILY_LIMIT = 10
 
@@ -104,8 +108,13 @@ def pick_question(tg_id: int) -> dict[str, Any] | None:
     questions = _query_questions(settings_row)
     if not questions:
         return None
-    not_used = [q for q in questions if q["id"] not in session.asked_ids]
-    pool = not_used if not_used else questions
+    normalized_questions = [q for q in (normalize_question(item) for item in questions) if q is not None]
+    if not normalized_questions:
+        logger.warning("No valid questions after normalization for tg_id=%s", tg_id)
+        return None
+
+    not_used = [q for q in normalized_questions if q["id"] not in session.asked_ids]
+    pool = not_used if not_used else normalized_questions
     question = random.choice(pool)
     session.asked_ids.add(question["id"])
     session.active_question_id = question["id"]
@@ -132,7 +141,12 @@ def save_answer(tg_id: int, question: dict[str, Any], answer_index: int) -> tupl
     if session.active_question_id != question["id"]:
         return False, "stale_question"
 
-    correct_option = int(question["correct_option"])
+    normalized_question = normalize_question(question)
+    if normalized_question is None:
+        logger.warning("Refused to save answer: invalid question payload id=%s", question.get("id"))
+        return False, "stale_question"
+
+    correct_option = int(normalized_question["correct"])
     is_correct = answer_index == correct_option
 
     db.client.table("answers").insert(
@@ -183,4 +197,6 @@ def save_answer(tg_id: int, question: dict[str, Any], answer_index: int) -> tupl
 
 def get_question_by_id(question_id: int) -> dict[str, Any] | None:
     rows = db.client.table("questions").select("*").eq("id", question_id).limit(1).execute().data
-    return rows[0] if rows else None
+    if not rows:
+        return None
+    return normalize_question(rows[0])
