@@ -219,11 +219,8 @@ def _parse_bulk_block(block: str) -> dict:
     return payload
 
 
-def _bulk_import_report(ok_count: int, skipped_count: int, errors: list[str]) -> str:
-    lines = [
-        f"Импорт: добавлено {ok_count}, ошибок {len(errors)}",
-        f"Пропущено дублей: {skipped_count}",
-    ]
+def _bulk_import_report(ok_count: int, errors: list[str]) -> str:
+    lines = [f"Импорт: добавлено {ok_count}, ошибок {len(errors)}"]
     if errors:
         lines.append("")
         lines.append("Первые ошибки:")
@@ -646,23 +643,25 @@ async def admin_bulk_import_input(message: Message, state: FSMContext) -> None:
         return
 
     ok_count = 0
-    skipped_count = 0
     errors: list[str] = []
+    valid_payloads: list[dict] = []
 
     for idx, block in enumerate(blocks, start=1):
         try:
             payload = _parse_bulk_block(block)
-            existing = db.client.table("questions").select("id").eq("q", payload["q"]).limit(1).execute().data or []
-            if existing:
-                skipped_count += 1
-                continue
-            db.client.table("questions").insert(payload).execute()
-            ok_count += 1
+            valid_payloads.append(payload)
         except Exception as exc:
             errors.append(f"Блок {idx}: {exc}")
 
+    for payload in valid_payloads:
+        try:
+            db.client.table("questions").insert(payload).execute()
+            ok_count += 1
+        except Exception as exc:
+            errors.append(f"Вставка '{payload.get('q', '')[:80]}': {exc}")
+
     await state.clear()
-    await message.answer(_bulk_import_report(ok_count=ok_count, skipped_count=skipped_count, errors=errors))
+    await message.answer(_bulk_import_report(ok_count=ok_count, errors=errors))
 
 
 @dp.callback_query(F.data == "admin:list_questions")
