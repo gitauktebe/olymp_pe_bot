@@ -19,15 +19,6 @@ from src.logic import admin as admin_logic
 from src.logic import entitlements, payments, quiz, rating
 from src.ui.keyboards import (
     admin_menu_kb,
-    admin_question_active_filter_kb,
-    admin_question_correct_kb,
-    admin_question_preview_kb,
-    admin_question_topic_filter_kb,
-    admin_questions_item_kb,
-    admin_questions_nav_kb,
-    admin_topics_choose_kb,
-    admin_topics_kb,
-    admin_topics_manage_kb,
     answers_kb,
     buy_kb,
     next_question_kb,
@@ -226,13 +217,8 @@ def _parse_bulk_block(block: str) -> dict:
     if "correct_option" not in payload:
         raise ValueError("не заполнен ANS")
 
-    options_list = [options["A"], options["B"], options["C"], options["D"]]
     payload.update(
         {
-            "type": "single",
-            "prompt": payload["text"],
-            "options": options_list,
-            "answer": {"correct": [payload["correct_option"]]},
             "option1": options["A"],
             "option2": options["B"],
             "option3": options["C"],
@@ -628,34 +614,31 @@ async def cmd_admin(message: Message, state: FSMContext) -> None:
     await message.answer("Админ-меню:", reply_markup=admin_menu_kb())
 
 
-@dp.callback_query(F.data == "admin:menu")
-async def admin_menu(callback: CallbackQuery, state: FSMContext) -> None:
+@dp.callback_query(F.data == "admin:add_question")
+async def admin_add_question(callback: CallbackQuery, state: FSMContext) -> None:
     if not admin_logic.has_admin_access(callback.from_user.id):
         await callback.answer("Недостаточно прав", show_alert=True)
         return
     await state.clear()
-    await callback.message.answer("Админ-меню:", reply_markup=admin_menu_kb())
+    await state.set_state(AddQuestionFSM.text)
+    await callback.message.answer("Текст вопроса?")
     await callback.answer()
 
 
 @dp.callback_query(F.data == "admin:bulk_import")
-async def admin_bulk_import_start(callback: CallbackQuery, state: FSMContext) -> None:
+async def admin_bulk_import_prompt(callback: CallbackQuery, state: FSMContext) -> None:
     if not admin_logic.has_admin_access(callback.from_user.id):
         await callback.answer("Недостаточно прав", show_alert=True)
         return
+    await state.clear()
     await state.set_state(AdminFSM.bulk_import)
     await callback.message.answer(
-        "Отправьте вопросы пачкой. Один блок = один вопрос, разделитель блоков — строка ---\n\n"
-        "Поддерживаемый формат:\n"
-        "Q: <текст вопроса>\n"
-        "A) <вариант 1>\n"
-        "B) <вариант 2>\n"
-        "C) <вариант 3>\n"
-        "D) <вариант 4>\n"
-        "ANS: <A|B|C|D>\n"
-        "TOPIC: <необязательно>\n"
-        "DIFF: <1-5 необязательно>\n"
-        "ACTIVE: <true|false необязательно, по умолчанию true>"
+        "Отправь текст импорта. Один блок = один вопрос, разделитель блоков: ---\n\n"
+        "Формат:\n"
+        "Q: <текст вопроса> (или В:)\n"
+        "A) <вариант 1>\nB) <вариант 2>\nC) <вариант 3>\nD) <вариант 4>\n"
+        "ANS: <A|B|C|D>\nTOPIC: <необязательно>\nDIFF: <1-5 необязательно>\nACTIVE: <true|false необязательно>\n\n"
+        "Если TOPIC / DIFF не указаны — сохранятся как пустые. ACTIVE по умолчанию true."
     )
     await callback.answer()
 
@@ -666,397 +649,268 @@ async def admin_bulk_import_input(message: Message, state: FSMContext) -> None:
         await state.clear()
         return
 
-    raw_text = message.text or ""
-    if raw_text.strip().lower() in {"/cancel", "отмена"}:
-        await state.clear()
-        await message.answer("Импорт отменён")
-        return
-
-    blocks = _split_bulk_blocks(raw_text)
+    blocks = _split_bulk_blocks((message.text or "").strip())
     if not blocks:
-        await message.answer("Не найдено ни одного блока. Проверьте формат и разделитель ---")
+        await message.answer("Не нашёл ни одного блока для импорта")
         return
 
     ok_count = 0
     errors: list[str] = []
+
     for idx, block in enumerate(blocks, start=1):
         try:
             payload = _parse_bulk_block(block)
             db.client.table("questions").insert(payload).execute()
             ok_count += 1
         except Exception as exc:
-            errors.append(f"#{idx}: {exc}")
+            errors.append(f"Блок {idx}: {exc}")
 
+    await state.clear()
     await message.answer(_bulk_import_report(total=len(blocks), ok_count=ok_count, errors=errors))
-    await state.clear()
 
 
-class AddQuestionTypeSingleFSM(StatesGroup):
-    topic = State()
-    new_topic = State()
-    prompt = State()
-    option_a = State()
-    option_b = State()
-    option_c = State()
-    option_d = State()
-
-
-class TopicsFSM(StatesGroup):
-    create = State()
-
-
-def _question_prompt(row: dict) -> str:
-    return (row.get("prompt") or row.get("text") or "").strip()
-
-
-def _question_options(row: dict) -> list[str]:
-    opts = row.get("options") or []
-    if isinstance(opts, list) and len(opts) == 4:
-        return [str(x) for x in opts]
-    return [row.get("option1") or "", row.get("option2") or "", row.get("option3") or "", row.get("option4") or ""]
-
-
-def _question_correct_index(row: dict) -> int:
-    answer = row.get("answer") or {}
-    if isinstance(answer, dict) and isinstance(answer.get("correct"), list) and answer["correct"]:
-        return int(answer["correct"][0])
-    return int(row.get("correct_option") or 1)
-
-
-def _add_preview(data: dict) -> str:
-    options = data["options"]
-    correct = data["correct"]
-    letters = ["A", "B", "C", "D"]
-    return (
-        f"<b>Превью вопроса</b>\n"
-        f"Тема ID: {data['topic_id']}\n"
-        f"Тип: single\n\n"
-        f"{data['prompt']}\n\n"
-        f"A) {options[0]}\n"
-        f"B) {options[1]}\n"
-        f"C) {options[2]}\n"
-        f"D) {options[3]}\n\n"
-        f"Правильный вариант: {letters[correct - 1]}"
-    )
-
-
-async def _start_add_single_question(message: Message | CallbackQuery, state: FSMContext) -> None:
-    rows = db.client.table("topics").select("id,title").order("id").limit(100).execute().data or []
-    await state.clear()
-    await state.set_state(AddQuestionTypeSingleFSM.topic)
-    if isinstance(message, CallbackQuery):
-        await message.message.answer("Выберите тему:", reply_markup=admin_topics_choose_kb(rows))
-    else:
-        await message.answer("Выберите тему:", reply_markup=admin_topics_choose_kb(rows))
-
-
-@dp.callback_query(F.data == "admin:add_question")
-async def admin_add_question(callback: CallbackQuery, state: FSMContext) -> None:
+@dp.callback_query(F.data == "admin:list_questions")
+async def admin_list_questions(callback: CallbackQuery) -> None:
     if not admin_logic.has_admin_access(callback.from_user.id):
         await callback.answer("Недостаточно прав", show_alert=True)
         return
-    await _start_add_single_question(callback, state)
-    await callback.answer()
 
-
-@dp.callback_query(AddQuestionTypeSingleFSM.topic, F.data.startswith("admin:topic_pick:"))
-async def add_pick_topic(callback: CallbackQuery, state: FSMContext) -> None:
-    topic_id = int(callback.data.split(":")[-1])
-    await state.update_data(topic_id=topic_id, type="single")
-    await state.set_state(AddQuestionTypeSingleFSM.prompt)
-    await callback.message.answer("Введите текст вопроса:")
-    await callback.answer()
-
-
-@dp.callback_query(AddQuestionTypeSingleFSM.topic, F.data == "admin:topic:new")
-async def add_topic_new(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(AddQuestionTypeSingleFSM.new_topic)
-    await callback.message.answer("Введите название новой темы:")
-    await callback.answer()
-
-
-@dp.message(AddQuestionTypeSingleFSM.new_topic)
-async def add_topic_new_input(message: Message, state: FSMContext) -> None:
-    title = (message.text or "").strip()
-    if not title:
-        await message.answer("Название темы не может быть пустым")
-        return
-    created = db.client.table("topics").insert({"title": title, "is_active": True}).execute().data or []
-    if not created:
-        await message.answer("Не удалось создать тему")
-        return
-    await state.update_data(topic_id=int(created[0]["id"]), type="single")
-    await state.set_state(AddQuestionTypeSingleFSM.prompt)
-    await message.answer("Тема создана. Введите текст вопроса:")
-
-
-@dp.message(AddQuestionTypeSingleFSM.prompt)
-async def add_prompt(message: Message, state: FSMContext) -> None:
-    prompt = (message.text or "").strip()
-    if not prompt:
-        await message.answer("Текст не должен быть пустым")
-        return
-    await state.update_data(prompt=prompt)
-    await state.set_state(AddQuestionTypeSingleFSM.option_a)
-    await message.answer("Введите вариант A:")
-
-
-@dp.message(AddQuestionTypeSingleFSM.option_a)
-async def add_a(message: Message, state: FSMContext) -> None:
-    await state.update_data(option_a=(message.text or "").strip())
-    await state.set_state(AddQuestionTypeSingleFSM.option_b)
-    await message.answer("Введите вариант B:")
-
-
-@dp.message(AddQuestionTypeSingleFSM.option_b)
-async def add_b(message: Message, state: FSMContext) -> None:
-    await state.update_data(option_b=(message.text or "").strip())
-    await state.set_state(AddQuestionTypeSingleFSM.option_c)
-    await message.answer("Введите вариант C:")
-
-
-@dp.message(AddQuestionTypeSingleFSM.option_c)
-async def add_c(message: Message, state: FSMContext) -> None:
-    await state.update_data(option_c=(message.text or "").strip())
-    await state.set_state(AddQuestionTypeSingleFSM.option_d)
-    await message.answer("Введите вариант D:")
-
-
-@dp.message(AddQuestionTypeSingleFSM.option_d)
-async def add_d(message: Message, state: FSMContext) -> None:
-    await state.update_data(option_d=(message.text or "").strip())
-    await message.answer("Выберите правильный вариант:", reply_markup=admin_question_correct_kb())
-
-
-@dp.callback_query(F.data.startswith("admin:correct:"))
-async def add_correct(callback: CallbackQuery, state: FSMContext) -> None:
-    if await state.get_state() != AddQuestionTypeSingleFSM.option_d.state:
-        await callback.answer("Не в сценарии добавления", show_alert=True)
-        return
-    letter = callback.data.split(":")[-1]
-    idx = {"A": 1, "B": 2, "C": 3, "D": 4}[letter]
-    data = await state.get_data()
-    payload = {
-        "topic_id": data["topic_id"],
-        "type": "single",
-        "prompt": data["prompt"],
-        "options": [data["option_a"], data["option_b"], data["option_c"], data["option_d"]],
-        "answer": {"correct": [idx]},
-        "correct": idx,
-    }
-    await state.update_data(**payload)
-    await callback.message.answer(_add_preview(payload), reply_markup=admin_question_preview_kb())
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "admin:add:save")
-async def add_save(callback: CallbackQuery, state: FSMContext) -> None:
-    data = await state.get_data()
-    if not data.get("prompt"):
-        await callback.answer("Нет данных для сохранения", show_alert=True)
-        return
-    payload = {
-        "topic_id": data["topic_id"],
-        "type": "single",
-        "prompt": data["prompt"],
-        "options": data["options"],
-        "answer": {"correct": [data["correct"]]},
-        "is_active": True,
-        "text": data["prompt"],
-        "option1": data["options"][0],
-        "option2": data["options"][1],
-        "option3": data["options"][2],
-        "option4": data["options"][3],
-        "correct_option": data["correct"],
-    }
-    db.client.table("questions").insert(payload).execute()
-    await state.clear()
-    await callback.message.answer("Вопрос сохранён ✅")
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "admin:add:edit")
-async def add_edit(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(AddQuestionTypeSingleFSM.prompt)
-    await callback.message.answer("Введите текст вопроса заново:")
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "admin:add:cancel")
-async def add_cancel(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.clear()
-    await callback.message.answer("Добавление отменено")
-    await callback.answer()
-
-
-async def _render_questions_page(message: Message | CallbackQuery, page: int, topic_id: int | None, active: str) -> None:
-    query = db.client.table("questions").select("id,prompt,text,is_active,topic_id").order("id", desc=True)
-    if topic_id:
-        query = query.eq("topic_id", topic_id)
-    if active == "active":
-        query = query.eq("is_active", True)
-    elif active == "inactive":
-        query = query.eq("is_active", False)
-
-    offset = (page - 1) * 10
-    rows = query.range(offset, offset + 9).execute().data or []
-    next_rows = query.range(offset + 10, offset + 10).execute().data or []
-    has_next = bool(next_rows)
-
-    if isinstance(message, CallbackQuery):
-        send = message.message.answer
-    else:
-        send = message.answer
-
+    rows = (
+        db.client.table("questions")
+        .select("id,text,is_active")
+        .order("id", desc=True)
+        .limit(10)
+        .execute()
+        .data
+        or []
+    )
     if not rows:
-        await send("Вопросы не найдены", reply_markup=admin_questions_nav_kb(page, False, topic_id, active))
-        return
-
-    for row in rows:
-        text = _question_prompt(row).replace("\n", " ")
-        short = f"{text[:80]}..." if len(text) > 80 else text
-        status = "✅" if row.get("is_active") else "⛔"
-        await send(f"#{row['id']} {status} {short}", reply_markup=admin_questions_item_kb(int(row["id"]), bool(row.get("is_active"))))
-    await send(f"Страница {page}", reply_markup=admin_questions_nav_kb(page, has_next, topic_id, active))
-
-
-@dp.callback_query(F.data == "admin:questions")
-async def admin_questions(callback: CallbackQuery) -> None:
-    if not admin_logic.has_admin_access(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
-        return
-    await _render_questions_page(callback, page=1, topic_id=None, active="all")
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("admin:q_page:"))
-async def admin_questions_page(callback: CallbackQuery) -> None:
-    if not admin_logic.has_admin_access(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
-        return
-    _, _, page_s, topic_s, active = callback.data.split(":")
-    topic_id = int(topic_s)
-    await _render_questions_page(callback, page=max(1, int(page_s)), topic_id=(topic_id or None), active=active)
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("admin:q_filter_topic:"))
-async def admin_questions_filter_topic(callback: CallbackQuery) -> None:
-    if not admin_logic.has_admin_access(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
-        return
-    _, _, _, page_s, active = callback.data.split(":")
-    topics = db.client.table("topics").select("id,title").order("title").limit(200).execute().data or []
-    await callback.message.answer(
-        "Фильтр по теме:",
-        reply_markup=admin_question_topic_filter_kb(topics, page=int(page_s), active=active),
-    )
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("admin:q_filter_active:"))
-async def admin_questions_filter_active(callback: CallbackQuery) -> None:
-    if not admin_logic.has_admin_access(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
-        return
-    _, _, _, page_s, topic_s = callback.data.split(":")
-    await callback.message.answer(
-        "Фильтр по активности:",
-        reply_markup=admin_question_active_filter_kb(page=int(page_s), topic_id=int(topic_s) or None),
-    )
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("admin:q_open:"))
-async def admin_q_open(callback: CallbackQuery) -> None:
-    qid = int(callback.data.split(":")[-1])
-    row = db.client.table("questions").select("*").eq("id", qid).limit(1).execute().data or []
-    if not row:
-        await callback.answer("Вопрос не найден", show_alert=True)
-        return
-    question = row[0]
-    options = _question_options(question)
-    correct = _question_correct_index(question)
-    letters = ["A", "B", "C", "D"]
-    await callback.message.answer(
-        f"<b>#{qid}</b>\n"
-        f"{_question_prompt(question)}\n\n"
-        f"A) {options[0]}\nB) {options[1]}\nC) {options[2]}\nD) {options[3]}\n\n"
-        f"Правильный: {letters[correct - 1]}"
-    )
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("admin:q_toggle:"))
-async def admin_q_toggle(callback: CallbackQuery) -> None:
-    qid = int(callback.data.split(":")[-1])
-    rows = db.client.table("questions").select("is_active").eq("id", qid).limit(1).execute().data or []
-    if not rows:
-        await callback.answer("Вопрос не найден", show_alert=True)
-        return
-    active = bool(rows[0]["is_active"])
-    db.client.table("questions").update({"is_active": not active}).eq("id", qid).execute()
-    await callback.answer("Активность обновлена")
-
-
-@dp.callback_query(F.data.startswith("admin:q_delete:"))
-async def admin_q_delete(callback: CallbackQuery) -> None:
-    qid = int(callback.data.split(":")[-1])
-    db.client.table("questions").delete().eq("id", qid).execute()
-    await callback.answer("Удалено")
-
-
-@dp.callback_query(F.data == "admin:topics")
-async def admin_topics(callback: CallbackQuery) -> None:
-    if not admin_logic.has_admin_access(callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
-        return
-    rows = db.client.table("topics").select("id,title").order("id").limit(200).execute().data or []
-    if not rows:
-        await callback.message.answer("Тем пока нет", reply_markup=admin_topics_kb())
+        await callback.message.answer("Вопросов пока нет")
     else:
+        lines = ["Последние 10 вопросов:"]
         for row in rows:
-            await callback.message.answer(f"#{row['id']}: {row['title']}", reply_markup=admin_topics_manage_kb(int(row["id"])))
-        await callback.message.answer("Управление темами:", reply_markup=admin_topics_kb())
+            status = "✅" if row.get("is_active") else "⛔"
+            text = (row.get("text") or "").replace("\n", " ").strip()
+            short_text = text[:70] + "..." if len(text) > 70 else text
+            lines.append(f"{row['id']}. {status} {short_text}")
+        await callback.message.answer("\n".join(lines))
     await callback.answer()
 
 
-@dp.callback_query(F.data == "admin:topic:create")
-async def admin_topic_create(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(TopicsFSM.create)
-    await callback.message.answer("Введите название темы:")
-    await callback.answer()
-
-
-@dp.message(TopicsFSM.create)
-async def admin_topic_create_input(message: Message, state: FSMContext) -> None:
-    title = (message.text or "").strip()
-    if not title:
-        await message.answer("Название не может быть пустым")
+@dp.callback_query(F.data == "admin:toggle_question")
+async def admin_toggle_prompt(callback: CallbackQuery, state: FSMContext) -> None:
+    if not admin_logic.has_admin_access(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
         return
-    db.client.table("topics").insert({"title": title, "is_active": True}).execute()
+    await state.set_state(AdminFSM.toggle_question)
+    await callback.message.answer("Отправь ID вопроса для переключения is_active")
+    await callback.answer()
+
+
+@dp.message(AdminFSM.toggle_question)
+async def admin_toggle_question(message: Message, state: FSMContext) -> None:
+    if not admin_logic.has_admin_access(message.from_user.id):
+        await state.clear()
+        return
+
+    text = (message.text or "").strip()
+    if not text.isdigit():
+        await message.answer("Нужен числовой ID вопроса")
+        return
+
+    qid = int(text)
+    rows = db.client.table("questions").select("id,is_active").eq("id", qid).limit(1).execute().data or []
+    if not rows:
+        await message.answer("Вопрос не найден")
+        return
+
+    is_active = bool(rows[0]["is_active"])
+    db.client.table("questions").update({"is_active": not is_active}).eq("id", qid).execute()
     await state.clear()
-    await message.answer("Тема добавлена ✅")
+    await message.answer(f"Статус вопроса {qid}: {'активен' if not is_active else 'выключен'}")
 
 
-@dp.callback_query(F.data.startswith("admin:topic_delete:"))
-async def admin_topic_delete(callback: CallbackQuery) -> None:
-    topic_id = int(callback.data.split(":")[-1])
-    cnt = db.client.table("questions").select("id", count="exact").eq("topic_id", topic_id).limit(1).execute().count or 0
-    if cnt > 0:
-        await callback.answer("Нельзя удалить: есть связанные вопросы", show_alert=True)
+@dp.callback_query(F.data == "admin:grant_admin")
+async def admin_grant_prompt(callback: CallbackQuery, state: FSMContext) -> None:
+    if not admin_logic.has_admin_access(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
         return
-    db.client.table("topics").delete().eq("id", topic_id).execute()
-    await callback.answer("Тема удалена")
+    await state.set_state(AdminFSM.grant_admin)
+    await callback.message.answer("Отправь tg_id нового админа")
+    await callback.answer()
+
+
+@dp.message(AdminFSM.grant_admin)
+async def admin_grant_input(message: Message, state: FSMContext) -> None:
+    if not admin_logic.has_admin_access(message.from_user.id):
+        await state.clear()
+        return
+
+    text = (message.text or "").strip()
+    if not text.isdigit():
+        await message.answer("Нужен числовой tg_id")
+        return
+
+    target = int(text)
+    ok = admin_logic.grant_admin(message.from_user.id, target, "editor")
+    await state.clear()
+    await message.answer("Админка выдана (role=editor)" if ok else "Недостаточно прав")
+
+
+@dp.message(Command("grant_admin"))
+async def cmd_grant_admin(message: Message) -> None:
+    parts = message.text.split()
+    if len(parts) != 3:
+        await message.answer("Использование: /grant_admin <tg_id> <role>")
+        return
+    target = int(parts[1])
+    role = parts[2].strip()
+    ok = admin_logic.grant_admin(message.from_user.id, target, role)
+    await message.answer("OK" if ok else "Недостаточно прав")
+
+
+@dp.message(Command("revoke_admin"))
+async def cmd_revoke_admin(message: Message) -> None:
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer("Использование: /revoke_admin <tg_id>")
+        return
+    target = int(parts[1])
+    ok = admin_logic.revoke_admin(message.from_user.id, target)
+    await message.answer("OK" if ok else "Недостаточно прав")
 
 
 @dp.message(Command("add_question"))
 async def cmd_add_question(message: Message, state: FSMContext) -> None:
     if not admin_logic.has_admin_access(message.from_user.id):
         return
-    await _start_add_single_question(message, state)
+    await state.clear()
+    await state.set_state(AddQuestionFSM.text)
+    await message.answer("Текст вопроса?")
 
 
+@dp.message(AddQuestionFSM.text)
+async def aq_text(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("Текст не должен быть пустым")
+        return
+    await state.update_data(text=text)
+    await state.set_state(AddQuestionFSM.option1)
+    await message.answer("Вариант 1?")
+
+
+@dp.message(AddQuestionFSM.option1)
+async def aq_o1(message: Message, state: FSMContext) -> None:
+    await state.update_data(option1=(message.text or "").strip())
+    await state.set_state(AddQuestionFSM.option2)
+    await message.answer("Вариант 2?")
+
+
+@dp.message(AddQuestionFSM.option2)
+async def aq_o2(message: Message, state: FSMContext) -> None:
+    await state.update_data(option2=(message.text or "").strip())
+    await state.set_state(AddQuestionFSM.option3)
+    await message.answer("Вариант 3?")
+
+
+@dp.message(AddQuestionFSM.option3)
+async def aq_o3(message: Message, state: FSMContext) -> None:
+    await state.update_data(option3=(message.text or "").strip())
+    await state.set_state(AddQuestionFSM.option4)
+    await message.answer("Вариант 4?")
+
+
+@dp.message(AddQuestionFSM.option4)
+async def aq_o4(message: Message, state: FSMContext) -> None:
+    await state.update_data(option4=(message.text or "").strip())
+    await state.set_state(AddQuestionFSM.correct_option)
+    await message.answer("Правильный вариант (1..4)?")
+
+
+@dp.message(AddQuestionFSM.correct_option)
+async def aq_correct(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if text not in {"1", "2", "3", "4"}:
+        await message.answer("Нужно число 1..4")
+        return
+    await state.update_data(correct_option=int(text))
+    rows = db.client.table("topics").select("id,title").eq("is_active", True).order("id").limit(100).execute().data or []
+    if rows:
+        topic_lines = [f"{row['id']}: {row['title']}" for row in rows]
+        await message.answer(
+            "Тема (опционально): отправь ID из списка или название новой темы. Для пропуска отправь -\n"
+            + "\n".join(topic_lines)
+        )
+    else:
+        await message.answer("Тема (опционально): отправь название новой темы или '-' для пропуска")
+    await state.set_state(AddQuestionFSM.topic)
+
+
+@dp.message(AddQuestionFSM.topic)
+async def aq_topic(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    topic_id = None
+    if text and text != "-":
+        if text.isdigit():
+            rows = db.client.table("topics").select("id").eq("id", int(text)).limit(1).execute().data or []
+            if not rows:
+                await message.answer("Тема с таким ID не найдена")
+                return
+            topic_id = int(text)
+        else:
+            created = db.client.table("topics").insert({"title": text, "is_active": True}).execute().data or []
+            if not created:
+                await message.answer("Не удалось создать тему")
+                return
+            topic_id = int(created[0]["id"])
+    await state.update_data(topic_id=topic_id)
+    await state.set_state(AddQuestionFSM.difficulty)
+    await message.answer("Сложность 1..5 (опционально), или '-' для пропуска")
+
+
+@dp.message(AddQuestionFSM.difficulty)
+async def aq_done(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    difficulty = None
+    if text and text != "-":
+        if not text.isdigit() or not (1 <= int(text) <= 5):
+            await message.answer("Нужно число 1..5 или '-' для пропуска")
+            return
+        difficulty = int(text)
+
+    data = await state.get_data()
+    payload = {
+        "text": data["text"],
+        "option1": data["option1"],
+        "option2": data["option2"],
+        "option3": data["option3"],
+        "option4": data["option4"],
+        "correct_option": data["correct_option"],
+        "is_active": True,
+    }
+    if data.get("topic_id") is not None:
+        payload["topic_id"] = data["topic_id"]
+    if difficulty is not None:
+        payload["difficulty"] = difficulty
+
+    db.client.table("questions").insert(payload).execute()
+    await state.clear()
+    await message.answer("Вопрос добавлен")
+
+
+@dp.message(Command("toggle_question"))
+async def cmd_toggle_question(message: Message) -> None:
+    if not admin_logic.has_admin_access(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer("Использование: /toggle_question <id>")
+        return
+    qid = int(parts[1])
+    row = db.client.table("questions").select("id,is_active").eq("id", qid).single().execute().data
+    db.client.table("questions").update({"is_active": not bool(row["is_active"])}).eq("id", qid).execute()
+    await message.answer("Статус переключён")
 
 
 async def main() -> None:
