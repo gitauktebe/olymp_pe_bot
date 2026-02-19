@@ -23,7 +23,6 @@ from src.ui.keyboards import (
     admin_menu_kb,
     answers_kb,
     buy_kb,
-    next_question_kb,
     rating_type_kb,
     start_kb,
     unlimited_settings_kb,
@@ -447,13 +446,34 @@ async def begin_quiz(message: Message) -> None:
 
 @dp.callback_query(F.data.startswith("ans:"))
 async def answer_handler(callback: CallbackQuery) -> None:
-    _, qid_s, answer_s = callback.data.split(":")
+    raw_data = callback.data or ""
+    logger.info("Received answer callback: user_id=%s data=%s", callback.from_user.id, raw_data)
+
+    parts = raw_data.split(":")
+    if len(parts) != 3:
+        logger.warning("Malformed answer callback_data format: data=%s", raw_data)
+        await callback.answer("Некорректный ответ", show_alert=True)
+        return
+
+    _, qid_s, answer_s = parts
+    if (not qid_s.isdigit()) or (not answer_s.isdigit()):
+        logger.warning("Malformed answer callback_data values: data=%s", raw_data)
+        await callback.answer("Некорректный ответ", show_alert=True)
+        return
+
     qid = int(qid_s)
     answer = int(answer_s)
+    if answer < 1 or answer > 4:
+        logger.warning("Answer choice out of range: data=%s", raw_data)
+        await callback.answer("Некорректный вариант", show_alert=True)
+        return
+
+    logger.info("Parsed answer callback: user_id=%s question_id=%s answer=%s", callback.from_user.id, qid, answer)
     tg_id = callback.from_user.id
 
     question = quiz.get_question_by_id(qid)
     if not question:
+        logger.warning("Question not found for callback: user_id=%s question_id=%s", tg_id, qid)
         await callback.answer("Вопрос не найден", show_alert=True)
         return
 
@@ -476,7 +496,13 @@ async def answer_handler(callback: CallbackQuery) -> None:
         return
 
     if status == "correct":
-        await callback.message.answer("Верно ✅", reply_markup=next_question_kb())
+        await callback.message.answer("✅ Верно")
+        await send_next_question(callback.message, tg_id)
+        return
+
+    if status == "wrong":
+        await callback.message.answer("❌ Неверно")
+        await send_next_question(callback.message, tg_id)
         return
 
     await callback.message.answer("Есть ошибка.", reply_markup=start_kb(has_unlimited=quiz.has_unlimited_now(tg_id)))
