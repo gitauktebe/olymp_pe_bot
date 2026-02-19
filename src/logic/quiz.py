@@ -141,24 +141,16 @@ def _build_answer_payload(
     answer_index: int,
     is_correct: bool,
     day: str,
-    mode: str | None = None,
 ) -> dict[str, Any]:
-    """
-    Build insert payload for public.answers using only known-compatible columns.
-
-    `mode` is intentionally omitted by default because some deployments do not
-    have a dedicated answers.mode column.
-    """
-    payload: dict[str, Any] = {
+    tz = pytz.timezone(settings.timezone)
+    return {
         "tg_id": tg_id,
-        "question_id": question_id,
-        "answer": answer_index,
-        "is_correct": is_correct,
         "day": day,
+        "question_id": question_id,
+        "chosen": answer_index,
+        "is_correct": is_correct,
+        "answered_at": datetime.now(tz).isoformat(),
     }
-    if mode:
-        logger.debug("Answer mode=%s is not persisted: answers.mode is schema-optional", mode)
-    return payload
 
 
 def save_answer(tg_id: int, question: dict[str, Any], answer_index: int) -> tuple[bool, str]:
@@ -173,8 +165,8 @@ def save_answer(tg_id: int, question: dict[str, Any], answer_index: int) -> tupl
         logger.warning("Refused to save answer: invalid question payload id=%s", question.get("id"))
         return False, "stale_question"
 
-    correct_option = int(normalized_question["correct"])
-    is_correct = answer_index == correct_option
+    correct = int(normalized_question["correct"])
+    is_correct = answer_index == correct
     day = _today_str()
     payload = _build_answer_payload(
         tg_id=tg_id,
@@ -182,7 +174,6 @@ def save_answer(tg_id: int, question: dict[str, Any], answer_index: int) -> tupl
         answer_index=answer_index,
         is_correct=is_correct,
         day=day,
-        mode=get_settings(tg_id).get("mode"),
     )
     try:
         db.client.table("answers").insert(payload).execute()
