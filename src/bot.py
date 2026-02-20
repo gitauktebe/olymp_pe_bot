@@ -14,6 +14,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Document, LabeledPrice, Message, PreCheckoutQuery
+from postgrest.exceptions import APIError
 
 from src.config import settings
 from src.db import db
@@ -221,13 +222,19 @@ def _parse_bulk_block(block: str) -> dict:
     return payload
 
 
-def _bulk_import_report(ok_count: int, errors: list[str]) -> str:
-    lines = [f"Импорт: добавлено {ok_count}, ошибок {len(errors)}"]
+def _bulk_import_report(ok_count: int, duplicate_count: int, errors: list[str]) -> str:
+    lines = [f"Импорт: добавлено {ok_count}, дубликатов {duplicate_count}, ошибок {len(errors)}"]
     if errors:
         lines.append("")
         lines.append("Первые ошибки:")
         lines.extend(errors[:5])
     return "\n".join(lines)
+
+def _is_duplicate_q_hash_error(exc: Exception) -> bool:
+    if not isinstance(exc, APIError):
+        return False
+    return exc.code == "23505" and "q_hash" in (exc.details or "")
+
 
 def _normalize_bool(value: str) -> bool | None:
     normalized = (value or "").strip().lower()
@@ -387,17 +394,30 @@ def _parse_csv_questions(csv_text: str) -> tuple[list[dict], list[str]]:
     return questions, errors
 
 
-def _bulk_insert_questions(payloads: list[dict], errors: list[str]) -> int:
+def _bulk_insert_questions(payloads: list[dict], errors: list[str]) -> tuple[int, int]:
     inserted = 0
+    duplicates = 0
     for chunk in _iter_chunks(payloads, chunk_size=100):
-        try:
-            db.client.table("questions").insert(chunk).execute()
-            inserted += len(chunk)
-            logger.info("Импорт CSV: вставлен чанк size=%s", len(chunk))
-        except Exception as exc:
-            logger.exception("Импорт CSV: ошибка вставки чанка size=%s", len(chunk))
-            errors.append(f"Ошибка вставки пачки ({len(chunk)} шт): {exc}")
-    return inserted
+        chunk_inserted = 0
+        chunk_duplicates = 0
+        for payload in chunk:
+            try:
+                db.client.table("questions").insert(payload).execute()
+                inserted += 1
+                chunk_inserted += 1
+            except Exception as exc:
+                if _is_duplicate_q_hash_error(exc):
+                    duplicates += 1
+                    chunk_duplicates += 1
+                    continue
+                errors.append(f"Вставка '{payload.get('text', '')[:80]}': {exc}")
+        logger.info(
+            "Импорт CSV: обработан чанк size=%s inserted=%s duplicates=%s",
+            len(chunk),
+            chunk_inserted,
+            chunk_duplicates,
+        )
+    return inserted, duplicates
 
 
 def _stats_message(st: dict) -> str:
@@ -846,6 +866,7 @@ async def admin_bulk_import_input(message: Message, state: FSMContext) -> None:
         return
 
     ok_count = 0
+    duplicate_count = 0
     errors: list[str] = []
     valid_payloads: list[dict] = []
 
@@ -861,10 +882,13 @@ async def admin_bulk_import_input(message: Message, state: FSMContext) -> None:
             db.client.table("questions").insert(payload).execute()
             ok_count += 1
         except Exception as exc:
+            if _is_duplicate_q_hash_error(exc):
+                duplicate_count += 1
+                continue
             errors.append(f"Вставка '{payload.get('q', '')[:80]}': {exc}")
 
     await state.clear()
-    await message.answer(_bulk_import_report(ok_count=ok_count, errors=errors))
+    await message.answer(_bulk_import_report(ok_count=ok_count, duplicate_count=duplicate_count, errors=errors))
 
 
 @dp.callback_query(F.data == "admin:file_import")
@@ -922,17 +946,21 @@ async def admin_file_import_input(message: Message, state: FSMContext) -> None:
         return
 
     payloads, errors = _parse_csv_questions(csv_text)
-    inserted = _bulk_insert_questions(payloads, errors) if payloads else 0
+    inserted, duplicates = _bulk_insert_questions(payloads, errors) if payloads else (0, 0)
 
     logger.info(
-        "Импорт CSV завершен: admin=%s inserted=%s errors=%s",
+        "Импорт CSV завершен: admin=%s inserted=%s duplicates=%s errors=%s",
         message.from_user.id,
         inserted,
+        duplicates,
         len(errors),
     )
 
     await state.clear()
-    await message.answer(_bulk_import_report(ok_count=inserted, errors=errors), parse_mode=None)
+    await message.answer(
+        _bulk_import_report(ok_count=inserted, duplicate_count=duplicates, errors=errors),
+        parse_mode=None,
+    )
 
 
 @dp.callback_query(F.data == "admin:list_questions")
