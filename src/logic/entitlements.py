@@ -79,3 +79,34 @@ def grant_purchase(
         "duplicate": False,
         "is_test": is_test,
     }
+
+
+def grant_unlimited_days(tg_id: int, days: int) -> datetime:
+    if days < 1:
+        raise ValueError("days must be >= 1")
+
+    now = datetime.now(timezone.utc)
+    current_until = _current_unlimited_until(tg_id)
+    start = current_until if current_until and current_until > now else now
+    new_until = start + timedelta(days=days)
+
+    db.client.table("subscriptions").upsert(
+        {
+            "tg_id": tg_id,
+            "unlimited_until": new_until.isoformat(),
+        },
+        on_conflict="tg_id",
+    ).execute()
+    return new_until
+
+
+def revoke_unlimited(tg_id: int) -> datetime:
+    now = datetime.now(timezone.utc)
+    db.client.table("subscriptions").upsert(
+        {
+            "tg_id": tg_id,
+            "unlimited_until": now.isoformat(),
+        },
+        on_conflict="tg_id",
+    ).execute()
+    return now

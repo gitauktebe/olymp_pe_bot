@@ -74,5 +74,18 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="Список последних 10 вопросов", callback_data="admin:list_questions")],
             [InlineKeyboardButton(text="Включить/выключить вопрос", callback_data="admin:toggle_question")],
             [InlineKeyboardButton(text="Выдать админку", callback_data="admin:grant_admin")],
+            [InlineKeyboardButton(text="Выдать безлимит", callback_data="admin:grant_unlimited")],
+            [InlineKeyboardButton(text="Снять безлимит", callback_data="admin:revoke_unlimited")],
+        ]
+    )
+
+
+def admin_unlimited_days_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="30 дней", callback_data="admin:grant_unlimited_days:30")],
+            [InlineKeyboardButton(text="7 дней", callback_data="admin:grant_unlimited_days:7")],
+            [InlineKeyboardButton(text="1 день", callback_data="admin:grant_unlimited_days:1")],
+            [InlineKeyboardButton(text="Ввести вручную", callback_data="admin:grant_unlimited_days:manual")],
         ]
     )

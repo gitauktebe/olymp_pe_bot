@@ -28,6 +28,7 @@ from src.ui.keyboards import (
     rating_type_kb,
     start_kb,
     unlimited_settings_kb,
+    admin_unlimited_days_kb,
 )
 from src.ui.texts import BLOCKED, DAILY_DONE, NO_QUESTIONS, WELCOME, WRONG_STOP, question_text
 
@@ -57,6 +58,9 @@ class AdminFSM(StatesGroup):
     grant_admin = State()
     bulk_import = State()
     file_import = State()
+    grant_unlimited_tg_id = State()
+    grant_unlimited_manual_days = State()
+    revoke_unlimited_tg_id = State()
 
 
 class UnlimitedFSM(StatesGroup):
@@ -937,6 +941,139 @@ async def admin_grant_input(message: Message, state: FSMContext) -> None:
     ok = admin_logic.grant_admin(message.from_user.id, target, "editor")
     await state.clear()
     await message.answer("Админка выдана (role=editor)" if ok else "Недостаточно прав")
+
+
+@dp.callback_query(F.data == "admin:grant_unlimited")
+async def admin_grant_unlimited_prompt(callback: CallbackQuery, state: FSMContext) -> None:
+    if not admin_logic.has_admin_access(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(AdminFSM.grant_unlimited_tg_id)
+    await callback.message.answer("Отправь tg_id пользователя для выдачи безлимита")
+    await callback.answer()
+
+
+@dp.message(AdminFSM.grant_unlimited_tg_id)
+async def admin_grant_unlimited_tg_id_input(message: Message, state: FSMContext) -> None:
+    if not admin_logic.has_admin_access(message.from_user.id):
+        await state.clear()
+        return
+
+    text = (message.text or "").strip()
+    if not text.isdigit():
+        await message.answer("Нужен числовой tg_id")
+        return
+
+    await state.update_data(target_tg_id=int(text))
+    await state.set_state(AdminFSM.grant_unlimited_manual_days)
+    await message.answer("Выбери срок безлимита:", reply_markup=admin_unlimited_days_kb())
+
+
+@dp.callback_query(F.data.startswith("admin:grant_unlimited_days:"))
+async def admin_grant_unlimited_days_pick(callback: CallbackQuery, state: FSMContext) -> None:
+    if not admin_logic.has_admin_access(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        await state.clear()
+        return
+
+    state_data = await state.get_data()
+    target_tg_id = state_data.get("target_tg_id")
+    if target_tg_id is None:
+        await callback.answer("Сначала укажи tg_id", show_alert=True)
+        await state.clear()
+        return
+
+    choice = callback.data.split(":")[-1]
+    if choice == "manual":
+        await state.set_state(AdminFSM.grant_unlimited_manual_days)
+        await callback.message.answer("Введи число дней (1..365)")
+        await callback.answer()
+        return
+
+    days = int(choice)
+    new_until = entitlements.grant_unlimited_days(target_tg_id, days)
+    until_utc = new_until.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    logger.info(
+        "Админ выдал безлимит: admin=%s target=%s days=%s until=%s",
+        callback.from_user.id,
+        target_tg_id,
+        days,
+        new_until.isoformat(),
+    )
+    await state.clear()
+    await callback.message.answer(f"✅ Безлимит выдан пользователю {target_tg_id} до {until_utc} (добавлено {days} дней)")
+    await callback.answer()
+
+
+@dp.message(AdminFSM.grant_unlimited_manual_days)
+async def admin_grant_unlimited_manual_days_input(message: Message, state: FSMContext) -> None:
+    if not admin_logic.has_admin_access(message.from_user.id):
+        await state.clear()
+        return
+
+    state_data = await state.get_data()
+    target_tg_id = state_data.get("target_tg_id")
+    if target_tg_id is None:
+        await state.clear()
+        await message.answer("Сначала выбери выдачу безлимита через админ-меню")
+        return
+
+    text = (message.text or "").strip()
+    if not text.isdigit():
+        await message.answer("Нужно число дней 1..365")
+        return
+
+    days = int(text)
+    if days < 1 or days > 365:
+        await message.answer("Нужно число дней 1..365")
+        return
+
+    new_until = entitlements.grant_unlimited_days(target_tg_id, days)
+    until_utc = new_until.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    logger.info(
+        "Админ выдал безлимит: admin=%s target=%s days=%s until=%s",
+        message.from_user.id,
+        target_tg_id,
+        days,
+        new_until.isoformat(),
+    )
+    await state.clear()
+    await message.answer(f"✅ Безлимит выдан пользователю {target_tg_id} до {until_utc} (добавлено {days} дней)")
+
+
+@dp.callback_query(F.data == "admin:revoke_unlimited")
+async def admin_revoke_unlimited_prompt(callback: CallbackQuery, state: FSMContext) -> None:
+    if not admin_logic.has_admin_access(callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(AdminFSM.revoke_unlimited_tg_id)
+    await callback.message.answer("Отправь tg_id пользователя для снятия безлимита")
+    await callback.answer()
+
+
+@dp.message(AdminFSM.revoke_unlimited_tg_id)
+async def admin_revoke_unlimited_input(message: Message, state: FSMContext) -> None:
+    if not admin_logic.has_admin_access(message.from_user.id):
+        await state.clear()
+        return
+
+    text = (message.text or "").strip()
+    if not text.isdigit():
+        await message.answer("Нужен числовой tg_id")
+        return
+
+    target_tg_id = int(text)
+    revoked_at = entitlements.revoke_unlimited(target_tg_id)
+    logger.info(
+        "Админ снял безлимит: admin=%s target=%s revoked_at=%s",
+        message.from_user.id,
+        target_tg_id,
+        revoked_at.isoformat(),
+    )
+    await state.clear()
+    await message.answer(f"✅ Безлимит снят у пользователя {target_tg_id}")
 
 
 @dp.message(Command("grant_admin"))
