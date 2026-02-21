@@ -4,7 +4,6 @@ import asyncio
 import csv
 import io
 import logging
-import re
 from datetime import datetime, timezone
 
 from aiogram import Bot, Dispatcher, F
@@ -20,6 +19,8 @@ from src.config import settings
 from src.db import db
 from src.logic import admin as admin_logic
 from src.logic import entitlements, payments, quiz, rating
+from src.logic.bulk_import import parse_bulk_block as _parse_bulk_block
+from src.logic.bulk_import import split_bulk_blocks as _split_bulk_blocks
 from src.ui.keyboards import (
     admin_menu_kb,
     answers_kb,
@@ -104,123 +105,6 @@ async def send_next_question(message: Message, tg_id: int) -> None:
         await message.answer(NO_QUESTIONS)
         return
     await message.answer(question_text(question), reply_markup=answers_kb(question["id"]))
-
-
-
-
-def _split_bulk_blocks(raw_text: str) -> list[str]:
-    blocks: list[str] = []
-    current: list[str] = []
-    for line in raw_text.splitlines():
-        normalized = line.strip()
-        if not normalized:
-            current.append(line)
-            continue
-
-        if normalized == "---":
-            block = "\n".join(current).strip()
-            if block:
-                blocks.append(block)
-            current = []
-            continue
-        current.append(line)
-    tail = "\n".join(current).strip()
-    if tail:
-        blocks.append(tail)
-    return blocks
-
-
-def _parse_bool(value: str) -> bool | None:
-    normalized = value.strip().lower()
-    if normalized in {"true", "1", "yes", "y", "да"}:
-        return True
-    if normalized in {"false", "0", "no", "n", "нет"}:
-        return False
-    return None
-
-
-def _resolve_topic_id(topic_raw: str) -> int:
-    topic_value = topic_raw.strip()
-    if not topic_value:
-        raise ValueError("TOPIC_ID: пустое значение")
-    if not topic_value.isdigit():
-        raise ValueError("TOPIC_ID должен быть числом")
-    return int(topic_value)
-
-
-def _parse_bulk_block(block: str) -> dict:
-    payload: dict = {"is_active": True}
-    options: dict[str, str] = {}
-
-    for raw_line in block.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-
-        option_match = re.match(r"^([ABCD])\)\s*(.+)$", line, flags=re.IGNORECASE)
-        if option_match:
-            letter = option_match.group(1).upper()
-            options[letter] = option_match.group(2).strip()
-            continue
-
-        q_match = re.match(r"^(?:Q|В)\s*:\s*(.+)$", line, flags=re.IGNORECASE)
-        if q_match:
-            payload["q"] = q_match.group(1).strip()
-            continue
-
-        field_match = re.match(r"^([A-ZА-Я_]+)\s*:\s*(.*)$", line, flags=re.IGNORECASE)
-        if not field_match:
-            raise ValueError(f"непонятная строка: {line}")
-
-        key = field_match.group(1).upper()
-        value = field_match.group(2).strip()
-
-        if key == "ANS":
-            answer_letter = value.upper()
-            if answer_letter not in {"A", "B", "C", "D"}:
-                raise ValueError("ANS должен быть A/B/C/D")
-            payload["correct"] = {"A": 1, "B": 2, "C": 3, "D": 4}[answer_letter]
-        elif key == "TOPIC_ID":
-            if value:
-                payload["topic_id"] = _resolve_topic_id(value)
-        elif key == "DIFF":
-            if not value:
-                continue
-            if not value.isdigit() or not (1 <= int(value) <= 5):
-                raise ValueError("DIFF должен быть числом 1..5")
-            payload["difficulty"] = int(value)
-        elif key == "ACTIVE":
-            if not value:
-                continue
-            bool_value = _parse_bool(value)
-            if bool_value is None:
-                raise ValueError("ACTIVE должен быть true/false")
-            payload["is_active"] = bool_value
-        elif key in {"Q", "В"}:
-            payload["q"] = value
-        else:
-            raise ValueError(f"неизвестное поле {key}")
-
-    if not payload.get("q"):
-        raise ValueError("не заполнен Q")
-
-    for letter in ("A", "B", "C", "D"):
-        if not options.get(letter):
-            raise ValueError(f"отсутствует вариант {letter}")
-
-    if "correct" not in payload:
-        raise ValueError("не заполнен ANS")
-
-    payload.update(
-        {
-            "a1": options["A"],
-            "a2": options["B"],
-            "a3": options["C"],
-            "a4": options["D"],
-        }
-    )
-    return payload
-
 
 def _bulk_import_report(ok_count: int, duplicate_count: int, errors: list[str]) -> str:
     lines = [f"Импорт: добавлено {ok_count}, дубликатов {duplicate_count}, ошибок {len(errors)}"]
@@ -843,10 +727,14 @@ async def admin_bulk_import_prompt(callback: CallbackQuery, state: FSMContext) -
     await state.clear()
     await state.set_state(AdminFSM.bulk_import)
     await callback.message.answer(
-        "Отправь текст импорта. Один блок = один вопрос, разделитель блоков: ---\n\n"
+        "Отправь текст импорта. Один блок = один вопрос.\n"
+        "Можно с разделителем --- или без него (тогда каждый новый блок начинается с Q:/В:).\n\n"
         "Формат:\n"
         "Q: <текст вопроса> (или В:)\n"
-        "A) <вариант 1>\nB) <вариант 2>\nC) <вариант 3>\nD) <вариант 4>\n"
+        "A) <вариант 1> / A: <вариант 1>\n"
+        "B) <вариант 2> / B: <вариант 2>\n"
+        "C) <вариант 3> / C: <вариант 3>\n"
+        "D) <вариант 4> / D: <вариант 4>\n"
         "ANS: <A|B|C|D>\nTOPIC_ID: <число, необязательно>\nDIFF: <1-5 необязательно>\nACTIVE: <true|false необязательно>\n\n"
         "Если TOPIC_ID / DIFF не указаны — сохранятся как пустые. ACTIVE по умолчанию true.",
         parse_mode=None,
